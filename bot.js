@@ -42,7 +42,13 @@ function getNextUsername(mode, customBase) {
     return email;
 }
 
-// --- Snapshot Helper (For strict debugging) ---
+// 🛑 Human Delay Helper (3 to 5 seconds random wait)
+async function humanDelay(page) {
+    const delay = Math.floor(Math.random() * 2000) + 3000; // 3000ms - 5000ms
+    await page.waitForTimeout(delay);
+}
+
+// 📸 Snapshot Helper
 async function takeSnapshot(page, socket, label) {
     if(!page || page.isClosed()) return;
     try {
@@ -74,7 +80,7 @@ async function startBot(settings, socket) {
             log(`🔄 Cycle ${i+1}: Connecting with ${currentProxy === "Direct IP" ? "No Proxy" : "Proxy"}`);
 
             browser = await chromium.launch({
-                headless: true,
+                headless: true, // Railway par TRUE
                 args: [
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox', 
@@ -94,7 +100,6 @@ async function startBot(settings, socket) {
                 userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
             });
 
-            // Anti-Detect Scripts
             await context.addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' });
@@ -102,11 +107,11 @@ async function startBot(settings, socket) {
 
             const page = await context.newPage();
 
-            // Background Stream (Still keeping specific snapshots)
+            // Background Stream
             const streamInterval = setInterval(async () => {
                 if (!isRunning || page.isClosed()) { clearInterval(streamInterval); return; }
                 try {
-                    const screenshot = await page.screenshot({ quality: 20, type: 'jpeg' }); // Low quality for stream
+                    const screenshot = await page.screenshot({ quality: 20, type: 'jpeg' });
                     socket.emit('screen_update', screenshot.toString('base64'));
                 } catch(e) {}
             }, 4000);
@@ -115,104 +120,115 @@ async function startBot(settings, socket) {
                 // --- STEP 1: NAME ---
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
-                
-                await takeSnapshot(page, socket, 'Page Loaded'); // 📸
+                await humanDelay(page); // 🛑 Wait 3-5s
+
+                await takeSnapshot(page, socket, 'Page Loaded');
 
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 const fName = faker.person.firstName();
                 log(`👤 Name: ${fName}`);
                 
-                // Human Typing (Slow)
-                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: 100 }); 
+                // Super Slow Typing (200ms - 400ms per key)
+                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: Math.floor(Math.random() * 200) + 200 }); 
                 
-                await takeSnapshot(page, socket, 'Name Filled'); // 📸
-                await page.waitForTimeout(500);
+                await takeSnapshot(page, socket, 'Name Filled');
+                await humanDelay(page); // 🛑 Wait 3-5s
+                
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Name)'); // 📸
+                await takeSnapshot(page, socket, 'Clicked Next (Name)');
 
                 // --- STEP 2: BIRTHDAY ---
                 log('🎂 Filling Birthday...');
                 await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
-                await takeSnapshot(page, socket, 'Birthday Page Loaded'); // 📸
+                await humanDelay(page); // 🛑 Wait 3-5s
 
+                // Month
                 await page.locator('#month').click();
-                await page.waitForTimeout(300);
+                await page.waitForTimeout(1000); // Thora slow
                 await page.getByRole('option', { name: 'January' }).click();
-
-                // Typing numbers slowly
-                await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 150 });
-                await page.locator('input[name="year"]').pressSequentially('1995', { delay: 150 });
-
-                await page.locator('#gender').click();
-                await page.waitForTimeout(300);
-                await page.getByRole('option', { name: 'Male', exact: false }).click();
-
-                await takeSnapshot(page, socket, 'Birthday Filled'); // 📸
                 await page.waitForTimeout(500);
+
+                // Day & Year (Typing Slowly)
+                await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
+                await page.waitForTimeout(500);
+                await page.locator('input[name="year"]').pressSequentially('1998', { delay: 300 });
+                await page.waitForTimeout(1000);
+
+                // Gender (Fixed Strict Mode Issue)
+                await page.locator('#gender').click();
+                await page.waitForTimeout(1000);
+                
+                const isMale = Math.random() > 0.5;
+                const genderText = isMale ? 'Male' : 'Female';
+                log(`Selected Gender: ${genderText}`);
+
+                // 🛠 FIX: exact: true use kiya taake Male/Female mix na hon
+                await page.getByRole('option', { name: genderText, exact: true }).click();
+
+                await takeSnapshot(page, socket, 'Birthday Filled');
+                await humanDelay(page); // 🛑 Wait 3-5s
+                
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Birthday)'); // 📸
+                await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
                 // --- STEP 3: USERNAME ---
                 log('📧 Handling Username...');
-                await page.waitForTimeout(2000);
-                await takeSnapshot(page, socket, 'Username Page Loaded'); // 📸
-
+                await page.waitForTimeout(3000); // Initial wait
+                
                 // Check Radio Button
                 const createOwnRadio = page.getByText('Create your own Gmail address');
                 if (await createOwnRadio.isVisible()) {
                     log('🔘 Clicking Radio Button...');
                     await createOwnRadio.click();
-                    await page.waitForTimeout(500);
-                    await takeSnapshot(page, socket, 'Radio Clicked'); // 📸
+                    await humanDelay(page); // 🛑 Wait 3-5s
                 }
 
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                // Human Typing
-                await page.locator('input[name="Username"]').pressSequentially(username, { delay: 120 });
+                await page.locator('input[name="Username"]').pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
                 
-                await takeSnapshot(page, socket, 'Username Typed'); // 📸
-                await page.waitForTimeout(800);
+                await takeSnapshot(page, socket, 'Username Typed');
+                await humanDelay(page); // 🛑 Wait 3-5s
+                
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Username)'); // 📸
+                await takeSnapshot(page, socket, 'Clicked Next (Username)');
 
-                // Check for immediate error
-                await page.waitForTimeout(1000);
+                await page.waitForTimeout(2000);
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_USER');
 
                 // --- STEP 4: PASSWORD ---
                 log('🔑 Setting Password...');
                 await page.waitForSelector('input[name="Passwd"]', { timeout: 15000 });
-                await takeSnapshot(page, socket, 'Password Page Loaded'); // 📸
+                await humanDelay(page); // 🛑 Wait 3-5s
 
                 const pass = settings.password;
                 
                 // Typing Password Slowly
-                await page.locator('input[name="Passwd"]').pressSequentially(pass, { delay: 100 });
-                await page.waitForTimeout(500);
-                await page.locator('input[name="PasswdAgain"]').pressSequentially(pass, { delay: 100 });
+                await page.locator('input[name="Passwd"]').pressSequentially(pass, { delay: 200 });
+                await page.waitForTimeout(1000);
+                await page.locator('input[name="PasswdAgain"]').pressSequentially(pass, { delay: 200 });
 
-                await takeSnapshot(page, socket, 'Password Filled'); // 📸
-                await page.waitForTimeout(1000); // Thora sa pause jese banda soch raha ho
+                await takeSnapshot(page, socket, 'Password Filled');
+                await humanDelay(page); // 🛑 Wait 3-5s
+                
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Password)'); // 📸
+                await takeSnapshot(page, socket, 'Clicked Next (Password)');
 
                 // --- STEP 5: FINAL VERIFICATION ---
                 log('📱 Final Check...');
-                await page.waitForTimeout(4000); // Result load hone ka wait
-                await takeSnapshot(page, socket, 'Final Result Page'); // 📸
+                await page.waitForTimeout(5000);
+                await takeSnapshot(page, socket, 'Final Result Page');
 
-                // Check Error
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED_FINAL: Google detected bot behavior at the end.');
+                    throw new Error('IP_BURNED_FINAL: Google detected bot behavior.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
                     log('✅ SUCCESS: Phone Skip Available!', 'success');
-                    await takeSnapshot(page, socket, 'Success Page'); // 📸
+                    await takeSnapshot(page, socket, 'Success Page');
                     await skipBtn.click();
                 } else {
                     log('⚠️ Phone Number Required.', 'error');
@@ -220,14 +236,14 @@ async function startBot(settings, socket) {
 
             } catch (stepError) {
                 log(`❌ Error: ${stepError.message}`, 'error');
-                await takeSnapshot(page, socket, 'ERROR STATE'); // 📸 Last moment ki tasveer
+                await takeSnapshot(page, socket, 'ERROR STATE');
             }
 
             clearInterval(streamInterval);
             await context.close();
             await browser.close();
-            log('💤 Cooling down 5s...');
-            await new Promise(r => setTimeout(r, 5000));
+            log('💤 Resting 10s before next cycle...');
+            await new Promise(r => setTimeout(r, 10000));
         }
 
     } catch (error) {
