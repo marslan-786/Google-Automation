@@ -42,6 +42,16 @@ function getNextUsername(mode, customBase) {
     return email;
 }
 
+// --- Snapshot Helper (For strict debugging) ---
+async function takeSnapshot(page, socket, label) {
+    if(!page || page.isClosed()) return;
+    try {
+        const screenshot = await page.screenshot({ quality: 40, type: 'jpeg' });
+        socket.emit('screen_update', screenshot.toString('base64'));
+        socket.emit('log', `📸 SNAPSHOT: ${label}`);
+    } catch (e) {}
+}
+
 // --- MAIN LOGIC ---
 async function startBot(settings, socket) {
     if (isRunning) return;
@@ -70,10 +80,6 @@ async function startBot(settings, socket) {
                     '--no-sandbox', 
                     '--disable-setuid-sandbox',
                     '--ignore-certificate-errors',
-                    '--disable-infobars',
-                    '--window-position=0,0',
-                    '--ignore-certifcate-errors',
-                    '--ignore-certifcate-errors-spki-list',
                 ]
             });
 
@@ -85,132 +91,136 @@ async function startBot(settings, socket) {
                 deviceScaleFactor: 3,
                 isMobile: true,
                 hasTouch: true,
-                // Force Google to think we are Android
                 userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
             });
 
-            // --- 🛑 ANTI-DETECT INJECTION (The Secret Sauce) ---
-            // Railway Linux Server ko chupa kar Real Android batana
+            // Anti-Detect Scripts
             await context.addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                // Platform ko Linux x86_64 se hata kar Android ARM banana
                 Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' });
-                // Hardware concurrency ko real phone jaisa banana
-                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
             });
 
             const page = await context.newPage();
 
-            // Screenshot Stream
+            // Background Stream (Still keeping specific snapshots)
             const streamInterval = setInterval(async () => {
                 if (!isRunning || page.isClosed()) { clearInterval(streamInterval); return; }
                 try {
-                    const screenshot = await page.screenshot({ quality: 30, type: 'jpeg' });
+                    const screenshot = await page.screenshot({ quality: 20, type: 'jpeg' }); // Low quality for stream
                     socket.emit('screen_update', screenshot.toString('base64'));
                 } catch(e) {}
-            }, 3000);
+            }, 4000);
 
             try {
                 // --- STEP 1: NAME ---
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
                 
-                // CHECK FOR EARLY ERROR
-                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED: Google blocked this proxy immediately.');
-                }
+                await takeSnapshot(page, socket, 'Page Loaded'); // 📸
+
+                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 const fName = faker.person.firstName();
-                log(`👤 Name: ${fName} (Skipping Last Name)`);
-                await page.fill('input[name="firstName"]', fName);
-                await page.waitForTimeout(1000);
+                log(`👤 Name: ${fName}`);
+                
+                // Human Typing (Slow)
+                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: 100 }); 
+                
+                await takeSnapshot(page, socket, 'Name Filled'); // 📸
+                await page.waitForTimeout(500);
                 await page.getByRole('button', { name: 'Next' }).click();
+                await takeSnapshot(page, socket, 'Clicked Next (Name)'); // 📸
 
                 // --- STEP 2: BIRTHDAY ---
                 log('🎂 Filling Birthday...');
                 await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
-                
-                // Month Click
+                await takeSnapshot(page, socket, 'Birthday Page Loaded'); // 📸
+
                 await page.locator('#month').click();
-                await page.waitForTimeout(500);
+                await page.waitForTimeout(300);
                 await page.getByRole('option', { name: 'January' }).click();
 
-                // Day & Year
-                await page.fill('input[name="day"]', String(Math.floor(Math.random() * 28) + 1));
-                await page.fill('input[name="year"]', String(Math.floor(Math.random() * (2000 - 1985 + 1)) + 1985));
+                // Typing numbers slowly
+                await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 150 });
+                await page.locator('input[name="year"]').pressSequentially('1995', { delay: 150 });
 
-                // Gender
                 await page.locator('#gender').click();
+                await page.waitForTimeout(300);
+                await page.getByRole('option', { name: 'Male', exact: false }).click();
+
+                await takeSnapshot(page, socket, 'Birthday Filled'); // 📸
                 await page.waitForTimeout(500);
-                const genderChoice = Math.random() > 0.5 ? 'Male' : 'Female';
-                await page.getByRole('option', { name: genderChoice, exact: false }).click();
-                
-                await page.waitForTimeout(1000);
                 await page.getByRole('button', { name: 'Next' }).click();
+                await takeSnapshot(page, socket, 'Clicked Next (Birthday)'); // 📸
 
-                // --- STEP 3: USERNAME (FIXED FOR RADIO BUTTONS) ---
-                log('📧 Handling Username Selection...');
-                
-                // Pehle wait karein ke page load ho jaye
+                // --- STEP 3: USERNAME ---
+                log('📧 Handling Username...');
                 await page.waitForTimeout(2000);
+                await takeSnapshot(page, socket, 'Username Page Loaded'); // 📸
 
-                // Check 1: Kya Radio Buttons aye hain?
+                // Check Radio Button
                 const createOwnRadio = page.getByText('Create your own Gmail address');
-                const customInput = page.locator('input[name="Username"]');
-
                 if (await createOwnRadio.isVisible()) {
-                    log('🔘 "Create your own" option detected. Clicking...');
-                    await createOwnRadio.click(); // Radio button select karo
-                    await page.waitForTimeout(1000); // Input field khulne ka wait
+                    log('🔘 Clicking Radio Button...');
+                    await createOwnRadio.click();
+                    await page.waitForTimeout(500);
+                    await takeSnapshot(page, socket, 'Radio Clicked'); // 📸
                 }
 
-                // Ab Input field dhoondo
-                if (await customInput.isVisible()) {
-                    const username = getNextUsername(settings.mode, settings.customBase);
-                    log(`⌨️ Typing Username: ${username}`);
-                    await customInput.fill(username);
-                    await page.waitForTimeout(1000);
-                    await page.getByRole('button', { name: 'Next' }).click();
-                } else {
-                    // Agar input field abhi bhi nahi mili to shayad direct aglay page par ho
-                    log('⚠️ Username input not found immediately, checking next step...');
-                }
+                const username = getNextUsername(settings.mode, settings.customBase);
+                log(`⌨️ Typing: ${username}`);
+                
+                // Human Typing
+                await page.locator('input[name="Username"]').pressSequentially(username, { delay: 120 });
+                
+                await takeSnapshot(page, socket, 'Username Typed'); // 📸
+                await page.waitForTimeout(800);
+                await page.getByRole('button', { name: 'Next' }).click();
+                await takeSnapshot(page, socket, 'Clicked Next (Username)'); // 📸
 
-                // CHECK FOR ERROR AFTER USERNAME
-                await page.waitForTimeout(2000);
-                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED: Google blocked after Username.');
-                }
+                // Check for immediate error
+                await page.waitForTimeout(1000);
+                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_USER');
 
                 // --- STEP 4: PASSWORD ---
                 log('🔑 Setting Password...');
                 await page.waitForSelector('input[name="Passwd"]', { timeout: 15000 });
+                await takeSnapshot(page, socket, 'Password Page Loaded'); // 📸
 
                 const pass = settings.password;
-                await page.fill('input[name="Passwd"]', pass);
-                await page.fill('input[name="PasswdAgain"]', pass);
+                
+                // Typing Password Slowly
+                await page.locator('input[name="Passwd"]').pressSequentially(pass, { delay: 100 });
+                await page.waitForTimeout(500);
+                await page.locator('input[name="PasswdAgain"]').pressSequentially(pass, { delay: 100 });
+
+                await takeSnapshot(page, socket, 'Password Filled'); // 📸
+                await page.waitForTimeout(1000); // Thora sa pause jese banda soch raha ho
                 await page.getByRole('button', { name: 'Next' }).click();
+                await takeSnapshot(page, socket, 'Clicked Next (Password)'); // 📸
 
-                // --- STEP 5: PHONE SKIP ---
-                log('📱 Checking Phone Verification...');
-                await page.waitForTimeout(3000);
+                // --- STEP 5: FINAL VERIFICATION ---
+                log('📱 Final Check...');
+                await page.waitForTimeout(4000); // Result load hone ka wait
+                await takeSnapshot(page, socket, 'Final Result Page'); // 📸
 
-                // ERROR CHECK FINAL
+                // Check Error
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED: Google blocked at Phone Step.');
+                    throw new Error('IP_BURNED_FINAL: Google detected bot behavior at the end.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
-                    log('✅ SUCCESS: Phone Skip Available! Clicking...', 'success');
+                    log('✅ SUCCESS: Phone Skip Available!', 'success');
+                    await takeSnapshot(page, socket, 'Success Page'); // 📸
                     await skipBtn.click();
                 } else {
-                    log('⚠️ Phone Number Required. Stopping.', 'error');
+                    log('⚠️ Phone Number Required.', 'error');
                 }
 
             } catch (stepError) {
                 log(`❌ Error: ${stepError.message}`, 'error');
-                // Agar IP Burn hui hai to agli proxy par jao, ruko mat
+                await takeSnapshot(page, socket, 'ERROR STATE'); // 📸 Last moment ki tasveer
             }
 
             clearInterval(streamInterval);
