@@ -9,6 +9,19 @@ chromium.use(StealthPlugin());
 
 let isRunning = false;
 
+// --- REAL MOBILE PRESETS (Google can't deny these) ---
+const MOBILE_DEVICES = [
+    { name: "Pixel 7", width: 412, height: 915, ratio: 3.5 },
+    { name: "Galaxy S22", width: 360, height: 800, ratio: 3.0 },
+    { name: "iPhone 14 Pro", width: 393, height: 852, ratio: 3.0 },
+    { name: "OnePlus 9", width: 412, height: 919, ratio: 3.5 },
+    { name: "Xiaomi 12", width: 393, height: 851, ratio: 3.0 }
+];
+
+function getRandomDevice() {
+    return MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
+}
+
 // --- Helper Functions ---
 function parseProxy(proxyStr) {
     if (!proxyStr || proxyStr.includes('Direct IP')) return null;
@@ -84,23 +97,19 @@ async function startBot(settings, socket) {
             try {
                 const currentProxy = proxyList[i];
                 const proxyData = parseProxy(currentProxy);
-                log(`🔄 Cycle ${i+1}: Initializing True Mobile Emulation...`);
+                
+                // 1. Pick a REAL Device Spec
+                const deviceSpec = getRandomDevice();
+                log(`🔄 Cycle ${i+1}: Emulating ${deviceSpec.name} (${deviceSpec.width}x${deviceSpec.height})...`);
 
-                // 1. GENERATE FINGERPRINT
+                // 2. Generate Fingerprint (Android Mobile Only)
                 const fingerprint = fingerprintGenerator.getFingerprint({
                     devices: ['mobile'],
                     operatingSystems: ['android'],
                     browsers: [{ name: 'chrome', minVersion: 110 }],
                 });
 
-                // 2. EXTRACT SCREEN DIMENSIONS (Most Important Part)
-                // Hum wahi screen size uthayenge jo fingerprint ne generate kiya hai
-                const { width, height } = fingerprint.fingerprint.screen;
-                
-                log(`📱 Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 30)}...`);
-                log(`📏 Screen Logic: Setting Viewport to ${width}x${height} (Portrait)`);
-
-                // 3. LAUNCH BROWSER WITH MOBILE ARGS
+                // 3. FORCE MOBILE ARGS
                 browser = await chromium.launch({
                     headless: true,
                     args: [
@@ -108,27 +117,44 @@ async function startBot(settings, socket) {
                         '--no-sandbox', 
                         '--disable-setuid-sandbox',
                         '--ignore-certificate-errors',
-                        `--window-size=${width},${height}`, // Force Window Size
-                        '--enable-features=NetworkService,NetworkServiceInProcess',
+                        `--window-size=${deviceSpec.width},${deviceSpec.height}`, // Force Window Size
+                        '--user-agent=' + fingerprint.fingerprint.navigator.userAgent // Force UA at launch
                     ]
                 });
 
-                // 4. CONTEXT WITH STRICT VIEWPORT MATCHING
+                // 4. CONTEXT WITH STRICT VIEWPORT
                 context = await browser.newContext({
                     proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                     locale: 'en-US',
-                    // Yahan hum Pixel fix nahi kar rahe, balki generated fingerprint ka size laga rahe hain
-                    viewport: { width: width, height: height }, 
+                    viewport: { width: deviceSpec.width, height: deviceSpec.height }, // STRICT PORTRAIT
+                    deviceScaleFactor: deviceSpec.ratio,
                     isMobile: true,
                     hasTouch: true,
-                    deviceScaleFactor: 3, // High DPI (Retina/OLED screens)
+                    userAgent: fingerprint.fingerprint.navigator.userAgent,
                 });
 
-                // 5. INJECT REST OF THE HARDWARE (Battery, GPU, Audio)
+                // 5. INJECT DEEP FINGERPRINTS (Battery, WebGL, Audio)
                 await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
                 page = await context.newPage(); 
+                
+                // 🔥🔥🔥 CDP SESSION (The "Heavy" Spoof) 🔥🔥🔥
+                // This talks directly to Chrome Engine to force Mobile Mode
+                const client = await context.newCDPSession(page);
+                await client.send('Emulation.setDeviceMetricsOverride', {
+                    width: deviceSpec.width,
+                    height: deviceSpec.height,
+                    deviceScaleFactor: deviceSpec.ratio,
+                    mobile: true,
+                    screenOrientation: { type: 'portraitPrimary', angle: 0 }
+                });
+                await client.send('Emulation.setTouchEmulationEnabled', {
+                    enabled: true,
+                    maxTouchPoints: 5
+                });
+                log(`📱 CDP Mobile Emulation Active.`);
 
+                // Stream Interval
                 const streamInterval = setInterval(async () => {
                     if (!isRunning || !page || page.isClosed()) { clearInterval(streamInterval); return; }
                     try {
@@ -141,9 +167,8 @@ async function startBot(settings, socket) {
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
                 await humanDelay(page);
-                await takeSnapshot(page, socket, 'Page Loaded');
+                await takeSnapshot(page, socket, 'Page Loaded (Should be Mobile View)');
 
-                // IP Check
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 // Step 1: Name
@@ -177,12 +202,11 @@ async function startBot(settings, socket) {
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
-                // --- STEP 3: USERNAME ---
+                // Step 3: Username
                 log('📧 Handling Username...');
                 await page.waitForTimeout(3000);
-                await takeSnapshot(page, socket, 'Username Page Reached'); 
+                await takeSnapshot(page, socket, 'Username Page'); 
 
-                // Detect if Google sent us to "Existing Email" page
                 const switchToGmail = page.getByRole('button', { name: 'Get a Gmail address instead' });
                 const useExistingText = page.getByText('Use an email address or phone number').first();
 
@@ -242,7 +266,7 @@ async function startBot(settings, socket) {
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_FINAL');
                 
                 if (await page.getByText('Verify some info before creating an account').isVisible() || await page.getByText('Scan the QR code').isVisible()) {
-                     throw new Error('CROSS_DEVICE_VERIFY');
+                     throw new Error('CROSS_DEVICE_VERIFY: Google still detects Desktop traits.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
