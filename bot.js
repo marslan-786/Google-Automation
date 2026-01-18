@@ -10,35 +10,19 @@ let browser = null;
 let context = null;
 let isRunning = false;
 
-// --- HELPER FUNCTIONS ---
-
+// --- Helper Functions ---
 function parseProxy(proxyStr) {
     if (!proxyStr || proxyStr.includes('Direct IP')) return null;
     try {
         let clean = proxyStr.replace(/^(http|https|socks4|socks5):\/\//, '');
-        let server, username, password;
-
         if (clean.includes('@')) {
-            const parts = clean.split('@');
-            const auth = parts[0].split(':');
-            const host = parts[1];
-            username = auth[0];
-            password = auth[1];
-            server = `http://${host}`;
-        } else {
-            const parts = clean.split(':');
-            if (parts.length === 4) {
-                server = `http://${parts[0]}:${parts[1]}`;
-                username = parts[2];
-                password = parts[3];
-            } else if (parts.length === 2) {
-                server = `http://${parts[0]}:${parts[1]}`;
-            }
-        }
-        return { server, username, password };
-    } catch (e) {
-        return null;
-    }
+            const [auth, host] = clean.split('@');
+            return { server: `http://${host}`, username: auth.split(':')[0], password: auth.split(':')[1] };
+        } 
+        const parts = clean.split(':');
+        if (parts.length === 4) return { server: `http://${parts[0]}:${parts[1]}`, username: parts[2], password: parts[3] };
+        return { server: `http://${parts[0]}:${parts[1]}` };
+    } catch (e) { return null; }
 }
 
 function getNextUsername(mode, customBase) {
@@ -47,35 +31,23 @@ function getNextUsername(mode, customBase) {
         const state = JSON.parse(fs.readFileSync('./state.json'));
         count = state.counter;
     }
-
     let email = "";
     if (mode === 'custom') {
         const suffix = String(count).padStart(2, '0');
         email = `${customBase}${suffix}`;
-        // Update Counter
         fs.writeFileSync('./state.json', JSON.stringify({ counter: count + 1 }));
     } else {
-        // Random High Trust format (e.g: ali.khan.9284)
-        email = faker.internet.userName().replace(/[^a-zA-Z0-9]/g, '') + Math.floor(Math.random() * 1000);
+        email = faker.internet.userName().replace(/[^a-zA-Z0-9]/g, '') + Math.floor(Math.random() * 9999);
     }
     return email;
 }
 
-function getRandomBirth() {
-    const day = Math.floor(Math.random() * 27) + 1;
-    const month = Math.floor(Math.random() * 12) + 1;
-    const year = Math.floor(Math.random() * (2002 - 1985 + 1)) + 1985; // 1985 to 2002
-    return { day: String(day), month: String(month), year: String(year) };
-}
-
-// --- MAIN BOT LOGIC ---
-
+// --- MAIN LOGIC ---
 async function startBot(settings, socket) {
     if (isRunning) return;
     isRunning = true;
 
     const proxies = settings.proxies.split('\n').filter(p => p.trim() !== "");
-    // Agar proxies empty hain to direct IP chalaye ga
     const proxyList = proxies.length > 0 ? proxies : ["Direct IP"];
 
     const log = (msg, type = 'normal') => {
@@ -84,34 +56,22 @@ async function startBot(settings, socket) {
     };
 
     try {
-        log(`🚀 Starting Process...`);
-
         for (let i = 0; i < proxyList.length; i++) {
             if (!isRunning) break;
 
             const currentProxy = proxyList[i];
             const proxyData = parseProxy(currentProxy);
-            log(`🔄 Connecting: ${currentProxy === "Direct IP" ? "Direct IP (No Proxy)" : "Proxy Active"}`);
+            log(`🔄 Cycle ${i+1}: Connecting with ${currentProxy === "Direct IP" ? "No Proxy" : "Proxy"}`);
 
-            // --- BROWSER SETUP ---
+            // 1. Launch Browser
             browser = await chromium.launch({
                 headless: true, // Railway par TRUE rakhna
-                args: [
-                    '--disable-blink-features=AutomationControlled',
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--ignore-certificate-errors'
-                ]
+                args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
             });
 
-            // Pixel 7 Emulation
             context = await browser.newContext({
                 ...devices['Pixel 7'],
-                proxy: proxyData ? {
-                    server: proxyData.server,
-                    username: proxyData.username,
-                    password: proxyData.password
-                } : undefined,
+                proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                 locale: 'en-US',
                 timezoneId: 'America/New_York',
                 deviceScaleFactor: 3,
@@ -121,123 +81,116 @@ async function startBot(settings, socket) {
 
             const page = await context.newPage();
 
-            // Screen Stream (Every 3s)
+            // Screenshot Stream
             const streamInterval = setInterval(async () => {
-                if (!isRunning || !page || page.isClosed()) {
-                    clearInterval(streamInterval);
-                    return;
-                }
+                if (!isRunning || page.isClosed()) { clearInterval(streamInterval); return; }
                 try {
                     const screenshot = await page.screenshot({ quality: 30, type: 'jpeg' });
                     socket.emit('screen_update', screenshot.toString('base64'));
                 } catch(e) {}
             }, 3000);
 
-            // --- STEP 1: OPEN GOOGLE SIGNUP ---
-            log('🌐 Opening Google Signup...');
-            await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
-            
-            // --- STEP 2: FILL NAME ---
-            const fName = faker.person.firstName();
-            const lName = faker.person.lastName(); // Generates but we might skip
-            
-            log(`👤 Name: ${fName} (Skipping Last Name)`);
-            
-            await page.waitForSelector('input[name="firstName"]');
-            await page.fill('input[name="firstName"]', fName);
-            // User requested to SKIP last name, so we do nothing for lastName input
-            
-            await page.waitForTimeout(1000); // Human pause
-            await page.getByRole('button', { name: 'Next' }).click();
-
-            // --- STEP 3: BIRTHDAY & GENDER ---
-            log('🎂 Waiting for Birthday Page...');
             try {
-                // Wait for Month selector or Basic Info text
-                await page.waitForSelector('#month', { timeout: 15000 });
+                // --- STEP 1: NAME ---
+                log('🌐 Opening Signup Page...');
+                await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
                 
-                const dob = getRandomBirth();
-                await page.fill('input[name="day"]', dob.day);
-                await page.selectOption('#month', dob.month); 
-                await page.fill('input[name="year"]', dob.year);
+                const fName = faker.person.firstName();
+                log(`👤 Name: ${fName} (Skipping Last Name)`);
                 
-                // Gender (1=Female, 2=Male usually, or Random select)
-                await page.selectOption('#gender', String(Math.floor(Math.random() * 2) + 1));
-                
-                log(`📅 DOB: ${dob.day}/${dob.month}/${dob.year}`);
+                await page.fill('input[name="firstName"]', fName);
                 await page.waitForTimeout(1000);
                 await page.getByRole('button', { name: 'Next' }).click();
-            } catch (e) {
-                log(`⚠️ Stuck at Birthday: ${e.message}`, 'error');
-                // throw e; // Agar yahan phansa to aglay step par nahi ja payega
-            }
 
-            // --- STEP 4: USERNAME SELECTION ---
-            log('📧 Handling Username...');
-            try {
-                // Google kabhi options deta hai, kabhi direct input
-                // Hum check karenge "Create your own" option hai ya nahi
-                const createOwn = await page.getByText('Create your own Gmail address');
-                if (await createOwn.isVisible()) {
-                    await createOwn.click();
-                }
+                // --- STEP 2: BIRTHDAY (FIXED LOGIC) ---
+                log('🎂 Filling Birthday (Human Style)...');
+                
+                // Wait for the Month Dropdown to appear
+                await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
 
+                // 1. Month Select Karna (Click Logic)
+                await page.locator('#month').click(); // Dropdown kholo
+                await page.waitForTimeout(500);
+                // "January" dhoond kar click karo
+                await page.getByRole('option', { name: 'January' }).click();
+
+                // 2. Day Fill Karna
+                const randomDay = String(Math.floor(Math.random() * 28) + 1);
+                await page.fill('input[name="day"]', randomDay);
+
+                // 3. Year Fill Karna
+                const randomYear = String(Math.floor(Math.random() * (2000 - 1985 + 1)) + 1985);
+                await page.fill('input[name="year"]', randomYear);
+
+                // 4. Gender Select Karna (Click Logic)
+                await page.locator('#gender').click(); // Dropdown kholo
+                await page.waitForTimeout(500);
+                
+                // Randomly Male ya Female select karo
+                const genderChoice = Math.random() > 0.5 ? 'Male' : 'Female';
+                await page.getByRole('option', { name: genderChoice, exact: false }).click();
+
+                log(`📅 Date: Jan/${randomDay}/${randomYear} | Gender: ${genderChoice}`);
+                
+                await page.waitForTimeout(1000);
+                await page.getByRole('button', { name: 'Next' }).click();
+
+                // --- STEP 3: USERNAME ---
+                log('📧 Creating Username...');
+                
+                // Kabhi kabhi Google "Create your own" ka option deta hai
+                try {
+                    const createOwnBtn = page.getByText('Create your own Gmail address');
+                    if (await createOwnBtn.isVisible()) {
+                        await createOwnBtn.click();
+                        await page.waitForTimeout(500);
+                    }
+                } catch(e) {}
+
+                // Username field ka intezar karo
+                await page.waitForSelector('input[name="Username"]', { timeout: 10000 });
+                
                 const username = getNextUsername(settings.mode, settings.customBase);
-                log(`⌨️ Typing User: ${username}`);
+                log(`⌨️ Typing: ${username}`);
                 
-                // Input field dhoondain (Name="Username" usually)
-                await page.waitForSelector('input[name="Username"]');
                 await page.fill('input[name="Username"]', username);
-                
                 await page.waitForTimeout(1000);
                 await page.getByRole('button', { name: 'Next' }).click();
 
-                // Check agar username taken ho
-                // (Advanced logic baad mein, abhi flow continue rakhte hain)
-
-            } catch (e) {
-                log(`⚠️ Stuck at Username: ${e.message}`, 'error');
-            }
-
-            // --- STEP 5: PASSWORD ---
-            log('🔑 Setting Password...');
-            try {
+                // --- STEP 4: PASSWORD ---
+                log('🔑 Setting Password...');
                 await page.waitForSelector('input[name="Passwd"]', { timeout: 15000 });
-                
+
                 const pass = settings.password;
                 await page.fill('input[name="Passwd"]', pass);
                 await page.fill('input[name="PasswdAgain"]', pass);
-                
                 await page.getByRole('button', { name: 'Next' }).click();
-            } catch (e) {
-                log(`⚠️ Stuck at Password: ${e.message}`, 'error');
-            }
 
-            // --- STEP 6: PHONE NUMBER CHECK ---
-            log('📱 Checking Phone Requirement...');
-            try {
-                await page.waitForTimeout(5000); // Wait for page load
-                
-                // Check agar Skip button hai
-                const skipBtn = await page.getByRole('button', { name: 'Skip' });
+                // --- STEP 5: PHONE SKIP CHECK ---
+                log('📱 Checking Phone Verification...');
+                await page.waitForTimeout(3000);
+
+                const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
-                    log('✅ SUCCESS! Phone Skip Available. Clicking Skip...', 'success');
+                    log('✅ SUCCESS: Phone Skip Available! Clicking...', 'success');
                     await skipBtn.click();
-                    // Yahan se aagay review page hota hai
+                    // Yahan mazeed steps (Review/Agree) add kiye ja sakte hain
                 } else {
-                    log('⚠️ Phone Number Required (No Skip)', 'error');
+                    log('⚠️ Phone Number Required. Stopping here.', 'error');
                 }
-            } catch (e) {
-                log('❓ Unknown State at Phone Step');
+
+            } catch (stepError) {
+                // Agar koi bhi step fail hua to yahan pakra jaye ga
+                // Aur aglay steps nahi chalenge.
+                log(`❌ Stuck: ${stepError.message.split('\n')[0]}`, 'error');
             }
 
-            // Thora time dein taake screenshot update ho jaye
-            await page.waitForTimeout(5000);
-
-            log('🏁 Cycle Finished.');
+            // Cleanup before next proxy
             clearInterval(streamInterval);
             await context.close();
             await browser.close();
+            log('💤 Waiting 5s before next cycle...');
+            await new Promise(r => setTimeout(r, 5000));
         }
 
     } catch (error) {
