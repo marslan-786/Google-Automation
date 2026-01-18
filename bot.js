@@ -1,6 +1,7 @@
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const { devices } = require('playwright');
+const { FingerprintGenerator } = require('fingerprint-generator');
+const { FingerprintInjector } = require('fingerprint-injector');
 const { faker } = require('@faker-js/faker');
 const fs = require('fs');
 
@@ -63,6 +64,10 @@ async function startBot(settings, socket) {
     if (isRunning) return;
     isRunning = true;
 
+    // 1. Initialize Fingerprint Generators
+    const fingerprintGenerator = new FingerprintGenerator();
+    const fingerprintInjector = new FingerprintInjector();
+
     const proxies = settings.proxies.split('\n').filter(p => p.trim() !== "");
     const proxyList = proxies.length > 0 ? proxies : ["Direct IP"];
 
@@ -77,7 +82,17 @@ async function startBot(settings, socket) {
 
             const currentProxy = proxyList[i];
             const proxyData = parseProxy(currentProxy);
-            log(`🔄 Cycle ${i+1}: Connecting with ${currentProxy === "Direct IP" ? "No Proxy" : "Proxy"}`);
+            log(`🔄 Cycle ${i+1}: Connecting...`);
+
+            // 2. Generate a REAL Android Fingerprint
+            // Ye "Pixel 7" ki zid nahi karega, balki ek "VALID" Android device banayega
+            // Taa ke Google ko koi shaq na ho (Samsung, Xiaomi, Pixel - kuch bhi ho sakta hai)
+            const fingerprint = fingerprintGenerator.getFingerprint({
+                devices: ['mobile'],
+                operatingSystems: ['android'],
+            });
+
+            log(`📱 Spoofing Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 50)}...`);
 
             browser = await chromium.launch({
                 headless: true,
@@ -86,64 +101,19 @@ async function startBot(settings, socket) {
                     '--no-sandbox', 
                     '--disable-setuid-sandbox',
                     '--ignore-certificate-errors',
-                    '--disable-webgl-image-chromium', 
-                    '--disable-accelerated-2d-canvas',
                 ]
             });
 
+            // 3. Create Context with basic settings
             context = await browser.newContext({
-                ...devices['Pixel 7'],
                 proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                 locale: 'en-US',
-                // ⚠️ Timezone ab proxy ke hisab se set hona chahiye, hardcode hata diya hai
-                // timezoneId: 'America/New_York', 
-                deviceScaleFactor: 3,
-                isMobile: true,
-                hasTouch: true,
-                userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+                // Baki cheezein ab Injector handle karega
             });
 
-            // 🔥🔥🔥 THE HARDCORE SPOOFING INJECTION 🔥🔥🔥
-            await context.addInitScript(() => {
-                // 1. Webdriver Hiding
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                
-                // 2. Hardware Info (Real Pixel 7 Specs)
-                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-                Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' });
-
-                // 3. Fake Battery API (Mobile always has battery)
-                if (navigator.getBattery) {
-                    navigator.getBattery = async () => ({
-                        charging: true,
-                        chargingTime: 0,
-                        dischargingTime: Infinity,
-                        level: 0.85, // 85% Battery
-                        addEventListener: () => {}
-                    });
-                }
-
-                // 4. Fake Network Information (4G Connection)
-                Object.defineProperty(navigator, 'connection', {
-                    get: () => ({
-                        effectiveType: '4g',
-                        rtt: 50,
-                        downlink: 10,
-                        saveData: false
-                    })
-                });
-
-                // 5. 🛑 GPU SPOOFING (Sabse Important) 🛑
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    // UNMASKED_VENDOR_WEBGL
-                    if (parameter === 37445) return 'ARM';
-                    // UNMASKED_RENDERER_WEBGL (Mali-G710 is Pixel 7 GPU)
-                    if (parameter === 37446) return 'Mali-G710';
-                    return getParameter(parameter);
-                };
-            });
+            // 🔥🔥🔥 HEAVY INJECTION 🔥🔥🔥
+            // Ye function Graphics Card, Audio, Battery, Fonts sab badal dega
+            await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
             const page = await context.newPage();
 
@@ -164,6 +134,7 @@ async function startBot(settings, socket) {
 
                 await takeSnapshot(page, socket, 'Page Loaded');
 
+                // Initial IP Check
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 const fName = faker.person.firstName();
@@ -185,23 +156,20 @@ async function startBot(settings, socket) {
                 // Month
                 await page.locator('#month').click();
                 await page.waitForTimeout(1000);
-                await page.getByRole('option', { name: 'January' }).click();
+                await page.getByRole('option', { name: 'January' }).click(); // Better to keep January for consistency
                 await page.waitForTimeout(500);
 
                 // Day & Year
                 await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
                 await page.waitForTimeout(500);
-                await page.locator('input[name="year"]').pressSequentially('1998', { delay: 300 });
+                await page.locator('input[name="year"]').pressSequentially('1999', { delay: 300 });
                 await page.waitForTimeout(1000);
 
-                // Gender (Strict Mode Fixed)
+                // Gender
                 await page.locator('#gender').click();
                 await page.waitForTimeout(1000);
-                
                 const isMale = Math.random() > 0.5;
                 const genderText = isMale ? 'Male' : 'Female';
-                log(`Selected Gender: ${genderText}`);
-
                 await page.getByRole('option', { name: genderText, exact: true }).click();
 
                 await takeSnapshot(page, socket, 'Birthday Filled');
@@ -224,7 +192,6 @@ async function startBot(settings, socket) {
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                // Agar input field na ho to wait karo
                 const userField = page.locator('input[name="Username"]');
                 if (await userField.isVisible()) {
                     await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
@@ -233,7 +200,7 @@ async function startBot(settings, socket) {
                     await page.getByRole('button', { name: 'Next' }).click();
                     await takeSnapshot(page, socket, 'Clicked Next (Username)');
                 } else {
-                    log('⚠️ Username field not found immediately.');
+                    log('⚠️ Username field issue.');
                 }
 
                 await page.waitForTimeout(2000);
@@ -257,23 +224,22 @@ async function startBot(settings, socket) {
                 await takeSnapshot(page, socket, 'Clicked Next (Password)');
 
                 // --- STEP 5: FINAL VERIFICATION ---
-                log('📱 Final Check...');
+                log('📱 Final Check (The Moment of Truth)...');
                 await page.waitForTimeout(5000);
                 await takeSnapshot(page, socket, 'Final Result Page');
 
                 // Check Error
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED_FINAL: Google detected GPU/Server signature.');
+                    throw new Error('IP_BURNED_FINAL: Google rejected the fingerprint.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
-                    log('✅ SUCCESS: Account Created! Phone Skip Clicked.', 'success');
-                    await takeSnapshot(page, socket, 'Success Page');
+                    log('🎉 SUCCESS: Account Created! Phone Skip Available.', 'success');
+                    await takeSnapshot(page, socket, 'SUCCESS_SCREEN');
                     await skipBtn.click();
-                    // Yahan DB save logic aa sakti hai
                 } else {
-                    log('⚠️ Phone Number Required (Normal Verification).', 'error');
+                    log('⚠️ Phone Number Verification Required (Normal behavior).', 'error');
                 }
 
             } catch (stepError) {
@@ -284,7 +250,7 @@ async function startBot(settings, socket) {
             clearInterval(streamInterval);
             await context.close();
             await browser.close();
-            log('💤 Resting 10s before next cycle...');
+            log('💤 Resting 10s...');
             await new Promise(r => setTimeout(r, 10000));
         }
 
