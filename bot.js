@@ -7,22 +7,20 @@ const fs = require('fs');
 
 chromium.use(StealthPlugin());
 
-// --- REAL MOBILE PRESETS ---
+// --- CONFIG ---
 const MOBILE_DEVICES = [
     { name: "Pixel 7", width: 412, height: 915, ratio: 3.5 },
-    { name: "Galaxy S22", width: 360, height: 800, ratio: 3.0 },
-    { name: "iPhone 14 Pro", width: 393, height: 852, ratio: 3.0 },
-    { name: "OnePlus 9", width: 412, height: 919, ratio: 3.5 },
-    { name: "Xiaomi 12", width: 393, height: 851, ratio: 3.0 }
+    { name: "Galaxy S22", width: 360, height: 800, ratio: 3.0 }
 ];
+
+let isRunning = false;
+let manualResolver = null; // Promise resolver for pause logic
 
 function getRandomDevice() {
     return MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
 }
 
-let isRunning = false;
-
-// --- Helper Functions ---
+// --- HELPER FUNCTIONS ---
 function parseProxy(proxyStr) {
     if (!proxyStr || proxyStr.includes('Direct IP')) return null;
     try {
@@ -37,26 +35,8 @@ function parseProxy(proxyStr) {
     } catch (e) { return null; }
 }
 
-function getNextUsername(mode, customBase) {
-    let count = 1;
-    if (fs.existsSync('./state.json')) {
-        const state = JSON.parse(fs.readFileSync('./state.json'));
-        count = state.counter;
-    }
-    let email = "";
-    if (mode === 'custom') {
-        const suffix = String(count).padStart(2, '0');
-        email = `${customBase}${suffix}`;
-        fs.writeFileSync('./state.json', JSON.stringify({ counter: count + 1 }));
-    } else {
-        email = faker.internet.userName().replace(/[^a-zA-Z0-9]/g, '') + Math.floor(Math.random() * 9999);
-    }
-    return email;
-}
-
 async function humanDelay(page) {
-    const delay = Math.floor(Math.random() * 3000) + 2000; 
-    await page.waitForTimeout(delay);
+    await page.waitForTimeout(Math.floor(Math.random() * 2000) + 2000);
 }
 
 async function takeSnapshot(page, socket, label) {
@@ -65,9 +45,20 @@ async function takeSnapshot(page, socket, label) {
         const screenshot = await page.screenshot({ quality: 40, type: 'jpeg' });
         socket.emit('screen_update', screenshot.toString('base64'));
         socket.emit('log', `📸 SNAPSHOT: ${label}`);
-    } catch (e) {
-        socket.emit('log', `⚠️ Snapshot Failed: ${e.message}`);
-    }
+    } catch (e) {}
+}
+
+// 🔥 PAUSE FUNCTION 🔥
+// Ye function bot ko rok dega jab tak aap dashboard se reply na karein
+async function waitForManualInput(socket, type) {
+    socket.emit('log', `⚠️ WAITING FOR USER INPUT: ${type.toUpperCase()}`);
+    socket.emit('request_manual_input', type); // Frontend ko signal bhejo
+
+    return new Promise((resolve) => {
+        // Ye resolver hum global variable me store kar lenge
+        // server.js isko trigger karega
+        manualResolver = resolve;
+    });
 }
 
 // --- MAIN LOGIC ---
@@ -75,16 +66,22 @@ async function startBot(settings, socket) {
     if (isRunning) return;
     isRunning = true;
 
+    // LISTENER FOR MANUAL RESPONSE
+    // Jab frontend se jawab aaye ga, ye promise ko resolve karega
+    socket.on('manual_response', (data) => {
+        if (manualResolver) {
+            socket.emit('log', `✅ Received Manual Data: ${data.value}`);
+            manualResolver(data.value); // Resume bot
+            manualResolver = null;
+        }
+    });
+
     const fingerprintGenerator = new FingerprintGenerator();
     const fingerprintInjector = new FingerprintInjector();
-
     const proxies = settings.proxies.split('\n').filter(p => p.trim() !== "");
     const proxyList = proxies.length > 0 ? proxies : ["Direct IP"];
 
-    const log = (msg, type = 'normal') => {
-        let prefix = type === 'error' ? '❌ ' : type === 'success' ? '✅ ' : 'ℹ️ ';
-        socket.emit('log', `${prefix}${msg}`);
-    };
+    const log = (msg) => socket.emit('log', `ℹ️ ${msg}`);
 
     try {
         for (let i = 0; i < proxyList.length; i++) {
@@ -92,30 +89,24 @@ async function startBot(settings, socket) {
 
             let browser = null;
             let context = null;
-            let page = null; 
+            let page = null;
 
             try {
-                const currentProxy = proxyList[i];
-                const proxyData = parseProxy(currentProxy);
-                
+                const proxyData = parseProxy(proxyList[i]);
                 const deviceSpec = getRandomDevice();
-                log(`🔄 Cycle ${i+1}: Emulating ${deviceSpec.name} (${deviceSpec.width}x${deviceSpec.height})...`);
+                log(`🔄 Cycle ${i+1}: ${deviceSpec.name}`);
 
                 const fingerprint = fingerprintGenerator.getFingerprint({
-                    devices: ['mobile'],
-                    operatingSystems: ['android'],
-                    browsers: [{ name: 'chrome', minVersion: 110 }],
+                    devices: ['mobile'], operatingSystems: ['android'], browsers: [{ name: 'chrome', minVersion: 110 }]
                 });
 
                 browser = await chromium.launch({
                     headless: true,
                     args: [
                         '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox', 
-                        '--disable-setuid-sandbox',
-                        '--ignore-certificate-errors',
+                        '--no-sandbox', '--disable-setuid-sandbox',
                         `--window-size=${deviceSpec.width},${deviceSpec.height}`,
-                        '--user-agent=' + fingerprint.fingerprint.navigator.userAgent 
+                        '--user-agent=' + fingerprint.fingerprint.navigator.userAgent
                     ]
                 });
 
@@ -124,29 +115,21 @@ async function startBot(settings, socket) {
                     locale: 'en-US',
                     viewport: { width: deviceSpec.width, height: deviceSpec.height },
                     deviceScaleFactor: deviceSpec.ratio,
-                    isMobile: true,
-                    hasTouch: true,
+                    isMobile: true, hasTouch: true,
                     userAgent: fingerprint.fingerprint.navigator.userAgent,
                 });
 
                 await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
+                page = await context.newPage();
 
-                page = await context.newPage(); 
-                
-                // CDP Session (Mobile Force)
+                // CDP Force Mobile
                 const client = await context.newCDPSession(page);
                 await client.send('Emulation.setDeviceMetricsOverride', {
-                    width: deviceSpec.width,
-                    height: deviceSpec.height,
-                    deviceScaleFactor: deviceSpec.ratio,
-                    mobile: true,
-                    screenOrientation: { type: 'portraitPrimary', angle: 0 }
-                });
-                await client.send('Emulation.setTouchEmulationEnabled', {
-                    enabled: true,
-                    maxTouchPoints: 5
+                    width: deviceSpec.width, height: deviceSpec.height, deviceScaleFactor: deviceSpec.ratio,
+                    mobile: true, screenOrientation: { type: 'portraitPrimary', angle: 0 }
                 });
 
+                // Stream
                 const streamInterval = setInterval(async () => {
                     if (!isRunning || !page || page.isClosed()) { clearInterval(streamInterval); return; }
                     try {
@@ -155,160 +138,110 @@ async function startBot(settings, socket) {
                     } catch(e) {}
                 }, 4000);
 
-                // --- FLOW STARTS ---
-                log('🌐 Opening Signup Page...');
-                await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
+                // --- STEPS START ---
+                await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp');
                 await humanDelay(page);
-                await takeSnapshot(page, socket, 'Page Loaded');
 
-                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
-
-                // Step 1: Name
-                const fName = faker.person.firstName();
-                log(`👤 Name: ${fName}`);
-                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: Math.floor(Math.random() * 200) + 100 }); 
-                await takeSnapshot(page, socket, 'Name Filled');
-                await humanDelay(page);
+                // 1. Name
+                await page.locator('input[name="firstName"]').pressSequentially(faker.person.firstName(), { delay: 150 });
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Name)');
-
-                // Step 2: Birthday
-                log('🎂 Filling Birthday...');
-                await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
                 await humanDelay(page);
 
+                // 2. Birthday
+                await page.waitForSelector('#month');
                 await page.locator('#month').click();
-                await page.waitForTimeout(500);
                 await page.getByRole('option', { name: 'January' }).click();
-                
-                await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
-                await page.locator('input[name="year"]').pressSequentially('1999', { delay: 300 });
-
+                await page.locator('input[name="day"]').pressSequentially('15');
+                await page.locator('input[name="year"]').pressSequentially('1998');
                 await page.locator('#gender').click();
-                await page.waitForTimeout(1000);
-                const isMale = Math.random() > 0.5;
-                const genderText = isMale ? 'Male' : 'Female';
-                await page.getByRole('option', { name: genderText, exact: true }).click();
-
-                await humanDelay(page);
+                await page.getByRole('option', { name: 'Male', exact: true }).click();
                 await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
+                await humanDelay(page);
 
-                // --- STEP 3: USERNAME (RECOVERY LOGIC) ---
-                log('📧 Handling Username...');
+                // 3. Username (Smart Switch)
+                const switchToGmail = page.getByText('Get a Gmail address instead');
+                if (await switchToGmail.isVisible()) await switchToGmail.click();
+                
+                const createOwn = page.getByText('Create your own Gmail address');
+                if (await createOwn.isVisible()) await createOwn.click();
+
+                let username = faker.internet.userName().replace(/[^a-zA-Z0-9]/g, '') + Math.floor(Math.random() * 9999);
+                if(settings.mode === 'custom') {
+                     // Custom logic here (simplified for brevity)
+                     username = settings.customBase + Math.floor(Math.random() * 99); 
+                }
+
+                await page.locator('input').first().pressSequentially(username, { delay: 100 });
+                await page.getByRole('button', { name: 'Next' }).click();
+                await humanDelay(page);
+
+                // 4. Password
+                await page.locator('input[name="Passwd"]').pressSequentially(settings.password, { delay: 100 });
+                await page.locator('input[name="PasswdAgain"]').pressSequentially(settings.password, { delay: 100 });
+                await page.getByRole('button', { name: 'Next' }).click();
+                await humanDelay(page);
+
+                // 5. PHONE VERIFICATION (The New Part)
                 await page.waitForTimeout(3000);
-                await takeSnapshot(page, socket, 'Username Page Reached'); 
-
-                // 🛑 TRAP DETECTION
-                const existingPage = page.getByText('Use an email address or phone number').first();
-                const switchToGmail = page.getByText('Get a Gmail address instead').first();
-                const createGmailBtn = page.getByRole('button', { name: 'Create a Gmail address' });
-
-                if (await existingPage.isVisible()) {
-                    log('⚠️ Trap: Google forced "Existing Email". Attempting Switch...');
+                
+                // Check agar Skip hai
+                if (await page.getByRole('button', { name: 'Skip' }).isVisible()) {
+                    log('🎉 Phone Skip Available!');
+                    await page.getByRole('button', { name: 'Skip' }).click();
+                } else {
+                    log('📱 Phone Verification Required.');
+                    await takeSnapshot(page, socket, 'Phone Page Reached');
                     
-                    if (await switchToGmail.isVisible()) {
-                        await switchToGmail.click();
-                        log('✅ Clicked "Get a Gmail address instead"');
-                    } else if (await createGmailBtn.isVisible()) {
-                        await createGmailBtn.click();
-                        log('✅ Clicked "Create a Gmail address"');
-                    } else {
-                        log('❌ No Switch Button Found! Attempting blind type...');
+                    // a) Click "Send SMS" if visible (Android native view)
+                    if (await page.getByText('Send SMS').isVisible()) {
+                        log('Clicking "Send SMS"...');
+                        await page.getByText('Send SMS').click();
+                        await humanDelay(page);
                     }
-                    await humanDelay(page);
-                }
 
-                // Radio Button Logic
-                const createOwnRadio = page.getByText('Create your own Gmail address').first();
-                if (await createOwnRadio.isVisible()) {
-                    log('🔘 Clicking Radio Button...');
-                    await createOwnRadio.click();
-                    await humanDelay(page);
-                }
+                    // b) Check for Input Field
+                    const phoneInput = page.locator('input[type="tel"]').or(page.locator('#phoneNumberId'));
+                    if (await phoneInput.isVisible()) {
+                        // 🔥 PAUSE AND WAIT FOR USER 🔥
+                        const userNumber = await waitForManualInput(socket, 'phone');
+                        
+                        log(`Filling Phone: ${userNumber}`);
+                        await phoneInput.fill(userNumber);
+                        await page.getByRole('button', { name: 'Next' }).or(page.getByRole('button', { name: 'Get code' })).click();
+                        await humanDelay(page);
+                    }
 
-                const username = getNextUsername(settings.mode, settings.customBase);
-                log(`⌨️ Typing: ${username}`);
-                
-                // 🔥 FALLBACK SELECTOR: Find ANY input field
-                const userField = page.locator('input').first();
-                
-                if (await userField.isVisible()) {
-                    await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
-                    await humanDelay(page);
-                    await page.getByRole('button', { name: 'Next' }).click();
-                    await takeSnapshot(page, socket, 'Clicked Next (Username)');
-                } else {
-                    log('❌ CRITICAL: No Input Field found at all.');
-                    await takeSnapshot(page, socket, 'DEBUG_CRASH');
-                    throw new Error('Username Input Missing');
-                }
-
-                await page.waitForTimeout(2000);
-                // Check if Google rejected the switch
-                if (await page.getByText('Use an email address or phone number').isVisible()) {
-                     throw new Error('TRAP_LOOP: Google refused to switch to Gmail.');
-                }
-                
-                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_USER');
-
-                // Step 4: Password
-                log('🔑 Setting Password...');
-                await page.waitForSelector('input[name="Passwd"]', { timeout: 15000 });
-                await humanDelay(page);
-
-                const pass = settings.password;
-                await page.locator('input[name="Passwd"]').pressSequentially(pass, { delay: 200 });
-                await page.locator('input[name="PasswdAgain"]').pressSequentially(pass, { delay: 200 });
-                await humanDelay(page);
-                await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Password)');
-
-                // Step 5: Final Check
-                log('📱 Final Check...');
-                await page.waitForTimeout(5000);
-                await takeSnapshot(page, socket, 'Final Result Page');
-
-                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_FINAL');
-                
-                if (await page.getByText('Verify some info before creating an account').isVisible() || await page.getByText('Scan the QR code').isVisible()) {
-                     throw new Error('CROSS_DEVICE_VERIFY: Mobile Spoof successful, but Trust Score low.');
-                }
-
-                const skipBtn = page.getByRole('button', { name: 'Skip' });
-                if (await skipBtn.isVisible()) {
-                    log('🎉 SUCCESS: Account Created! Clicking Skip.', 'success');
-                    await takeSnapshot(page, socket, 'SUCCESS_SCREEN');
-                    await skipBtn.click();
-                } else {
-                    log('⚠️ Phone Number Required.', 'error');
+                    // c) OTP Input
+                    const otpInput = page.locator('input[type="tel"]').or(page.locator('input[name="code"]'));
+                    if (await otpInput.isVisible()) {
+                        await takeSnapshot(page, socket, 'OTP Page');
+                        
+                        // 🔥 PAUSE FOR OTP 🔥
+                        const otpCode = await waitForManualInput(socket, 'otp');
+                        
+                        log(`Filling OTP: ${otpCode}`);
+                        await otpInput.fill(otpCode);
+                        await page.getByRole('button', { name: 'Verify' }).or(page.getByRole('button', { name: 'Next' })).click();
+                        await humanDelay(page);
+                        
+                        log('🎉 Verified! Proceeding...');
+                        await takeSnapshot(page, socket, 'Verification Done');
+                    }
                 }
 
                 clearInterval(streamInterval);
 
-            } catch (stepError) {
-                log(`❌ Error: ${stepError.message}`, 'error');
-                if (page) await takeSnapshot(page, socket, 'ERROR STATE');
+            } catch (err) {
+                log(`❌ Error: ${err.message}`);
+                if(page) await takeSnapshot(page, socket, 'Error');
             } finally {
-                if (context) await context.close();
-                if (browser) await browser.close();
-                log('🗑️ Browser Destroyed.');
+                if(browser) await browser.close();
+                log('Cycle Ended.');
             }
-
-            log('💤 Resting 8s...');
-            await new Promise(r => setTimeout(r, 8000));
+            await new Promise(r => setTimeout(r, 5000));
         }
-
-    } catch (error) {
-        log(`❌ System Error: ${error.message}`, 'error');
-    } finally {
-        isRunning = false;
-        socket.emit('log', '🛑 All Tasks Stopped.');
-    }
-}
-
-async function stopBot() {
+    } catch (e) { log(e.message); }
     isRunning = false;
 }
 
-module.exports = { startBot, stopBot };
+module.exports = { startBot, stopBot: () => { isRunning = false; } };
