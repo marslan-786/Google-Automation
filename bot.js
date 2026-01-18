@@ -46,7 +46,6 @@ async function humanDelay(page) {
     await page.waitForTimeout(delay);
 }
 
-// 📸 Robust Snapshot Helper
 async function takeSnapshot(page, socket, label) {
     if(!page || page.isClosed()) return;
     try {
@@ -80,21 +79,28 @@ async function startBot(settings, socket) {
 
             let browser = null;
             let context = null;
-            let page = null; // Defined here for scope safety
+            let page = null; 
 
             try {
                 const currentProxy = proxyList[i];
                 const proxyData = parseProxy(currentProxy);
-                log(`🔄 Cycle ${i+1}: Initializing Fresh Process...`);
+                log(`🔄 Cycle ${i+1}: Initializing True Mobile Emulation...`);
 
+                // 1. GENERATE FINGERPRINT
                 const fingerprint = fingerprintGenerator.getFingerprint({
                     devices: ['mobile'],
                     operatingSystems: ['android'],
                     browsers: [{ name: 'chrome', minVersion: 110 }],
                 });
 
-                log(`📱 Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 40)}...`);
+                // 2. EXTRACT SCREEN DIMENSIONS (Most Important Part)
+                // Hum wahi screen size uthayenge jo fingerprint ne generate kiya hai
+                const { width, height } = fingerprint.fingerprint.screen;
+                
+                log(`📱 Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 30)}...`);
+                log(`📏 Screen Logic: Setting Viewport to ${width}x${height} (Portrait)`);
 
+                // 3. LAUNCH BROWSER WITH MOBILE ARGS
                 browser = await chromium.launch({
                     headless: true,
                     args: [
@@ -102,17 +108,26 @@ async function startBot(settings, socket) {
                         '--no-sandbox', 
                         '--disable-setuid-sandbox',
                         '--ignore-certificate-errors',
+                        `--window-size=${width},${height}`, // Force Window Size
+                        '--enable-features=NetworkService,NetworkServiceInProcess',
                     ]
                 });
 
+                // 4. CONTEXT WITH STRICT VIEWPORT MATCHING
                 context = await browser.newContext({
                     proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                     locale: 'en-US',
+                    // Yahan hum Pixel fix nahi kar rahe, balki generated fingerprint ka size laga rahe hain
+                    viewport: { width: width, height: height }, 
+                    isMobile: true,
+                    hasTouch: true,
+                    deviceScaleFactor: 3, // High DPI (Retina/OLED screens)
                 });
 
+                // 5. INJECT REST OF THE HARDWARE (Battery, GPU, Audio)
                 await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
-                page = await context.newPage(); // Assign to outer variable
+                page = await context.newPage(); 
 
                 const streamInterval = setInterval(async () => {
                     if (!isRunning || !page || page.isClosed()) { clearInterval(streamInterval); return; }
@@ -128,6 +143,7 @@ async function startBot(settings, socket) {
                 await humanDelay(page);
                 await takeSnapshot(page, socket, 'Page Loaded');
 
+                // IP Check
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 // Step 1: Name
@@ -161,27 +177,23 @@ async function startBot(settings, socket) {
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
-                // --- STEP 3: USERNAME (CRASH FIX) ---
+                // --- STEP 3: USERNAME ---
                 log('📧 Handling Username...');
                 await page.waitForTimeout(3000);
-                
-                // 🔥 IMMEDIATE SNAPSHOT (To see where we are)
                 await takeSnapshot(page, socket, 'Username Page Reached'); 
 
-                // 🛑 Fix for Strict Mode Error (Using .first() and specific button role)
+                // Detect if Google sent us to "Existing Email" page
                 const switchToGmail = page.getByRole('button', { name: 'Get a Gmail address instead' });
-                const useExistingText = page.getByText('Use an email address or phone number').first(); // .first() lagaya taake crash na ho
+                const useExistingText = page.getByText('Use an email address or phone number').first();
 
                 if (await switchToGmail.isVisible() || await useExistingText.isVisible()) {
                     log('⚠️ Detected "Existing Email" page. Switching...');
                     if (await switchToGmail.isVisible()) {
                         await switchToGmail.click();
                     } else {
-                        // Agar button nahi mila to shayed text click karne se kaam ban jaye
                         await useExistingText.click(); 
                     }
                     await humanDelay(page);
-                    await takeSnapshot(page, socket, 'Switched to Gmail');
                 }
 
                 const createOwnRadio = page.getByText('Create your own Gmail address').first();
@@ -246,7 +258,6 @@ async function startBot(settings, socket) {
 
             } catch (stepError) {
                 log(`❌ Error: ${stepError.message}`, 'error');
-                // Ab agar page exist karta hai to snapshot lega, warna nahi
                 if (page) await takeSnapshot(page, socket, 'ERROR STATE');
             } finally {
                 if (context) await context.close();
