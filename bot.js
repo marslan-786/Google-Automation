@@ -63,10 +63,18 @@ async function startBot(settings, socket) {
             const proxyData = parseProxy(currentProxy);
             log(`🔄 Cycle ${i+1}: Connecting with ${currentProxy === "Direct IP" ? "No Proxy" : "Proxy"}`);
 
-            // 1. Launch Browser
             browser = await chromium.launch({
-                headless: true, // Railway par TRUE rakhna
-                args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
+                headless: true,
+                args: [
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--ignore-certificate-errors',
+                    '--disable-infobars',
+                    '--window-position=0,0',
+                    '--ignore-certifcate-errors',
+                    '--ignore-certifcate-errors-spki-list',
+                ]
             });
 
             context = await browser.newContext({
@@ -77,6 +85,18 @@ async function startBot(settings, socket) {
                 deviceScaleFactor: 3,
                 isMobile: true,
                 hasTouch: true,
+                // Force Google to think we are Android
+                userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+            });
+
+            // --- 🛑 ANTI-DETECT INJECTION (The Secret Sauce) ---
+            // Railway Linux Server ko chupa kar Real Android batana
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                // Platform ko Linux x86_64 se hata kar Android ARM banana
+                Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' });
+                // Hardware concurrency ko real phone jaisa banana
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
             });
 
             const page = await context.newPage();
@@ -95,67 +115,72 @@ async function startBot(settings, socket) {
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
                 
+                // CHECK FOR EARLY ERROR
+                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
+                    throw new Error('IP_BURNED: Google blocked this proxy immediately.');
+                }
+
                 const fName = faker.person.firstName();
                 log(`👤 Name: ${fName} (Skipping Last Name)`);
-                
                 await page.fill('input[name="firstName"]', fName);
                 await page.waitForTimeout(1000);
                 await page.getByRole('button', { name: 'Next' }).click();
 
-                // --- STEP 2: BIRTHDAY (FIXED LOGIC) ---
-                log('🎂 Filling Birthday (Human Style)...');
-                
-                // Wait for the Month Dropdown to appear
+                // --- STEP 2: BIRTHDAY ---
+                log('🎂 Filling Birthday...');
                 await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
-
-                // 1. Month Select Karna (Click Logic)
-                await page.locator('#month').click(); // Dropdown kholo
+                
+                // Month Click
+                await page.locator('#month').click();
                 await page.waitForTimeout(500);
-                // "January" dhoond kar click karo
                 await page.getByRole('option', { name: 'January' }).click();
 
-                // 2. Day Fill Karna
-                const randomDay = String(Math.floor(Math.random() * 28) + 1);
-                await page.fill('input[name="day"]', randomDay);
+                // Day & Year
+                await page.fill('input[name="day"]', String(Math.floor(Math.random() * 28) + 1));
+                await page.fill('input[name="year"]', String(Math.floor(Math.random() * (2000 - 1985 + 1)) + 1985));
 
-                // 3. Year Fill Karna
-                const randomYear = String(Math.floor(Math.random() * (2000 - 1985 + 1)) + 1985);
-                await page.fill('input[name="year"]', randomYear);
-
-                // 4. Gender Select Karna (Click Logic)
-                await page.locator('#gender').click(); // Dropdown kholo
+                // Gender
+                await page.locator('#gender').click();
                 await page.waitForTimeout(500);
-                
-                // Randomly Male ya Female select karo
                 const genderChoice = Math.random() > 0.5 ? 'Male' : 'Female';
                 await page.getByRole('option', { name: genderChoice, exact: false }).click();
-
-                log(`📅 Date: Jan/${randomDay}/${randomYear} | Gender: ${genderChoice}`);
                 
                 await page.waitForTimeout(1000);
                 await page.getByRole('button', { name: 'Next' }).click();
 
-                // --- STEP 3: USERNAME ---
-                log('📧 Creating Username...');
+                // --- STEP 3: USERNAME (FIXED FOR RADIO BUTTONS) ---
+                log('📧 Handling Username Selection...');
                 
-                // Kabhi kabhi Google "Create your own" ka option deta hai
-                try {
-                    const createOwnBtn = page.getByText('Create your own Gmail address');
-                    if (await createOwnBtn.isVisible()) {
-                        await createOwnBtn.click();
-                        await page.waitForTimeout(500);
-                    }
-                } catch(e) {}
+                // Pehle wait karein ke page load ho jaye
+                await page.waitForTimeout(2000);
 
-                // Username field ka intezar karo
-                await page.waitForSelector('input[name="Username"]', { timeout: 10000 });
-                
-                const username = getNextUsername(settings.mode, settings.customBase);
-                log(`⌨️ Typing: ${username}`);
-                
-                await page.fill('input[name="Username"]', username);
-                await page.waitForTimeout(1000);
-                await page.getByRole('button', { name: 'Next' }).click();
+                // Check 1: Kya Radio Buttons aye hain?
+                const createOwnRadio = page.getByText('Create your own Gmail address');
+                const customInput = page.locator('input[name="Username"]');
+
+                if (await createOwnRadio.isVisible()) {
+                    log('🔘 "Create your own" option detected. Clicking...');
+                    await createOwnRadio.click(); // Radio button select karo
+                    await page.waitForTimeout(1000); // Input field khulne ka wait
+                }
+
+                // Ab Input field dhoondo
+                if (await customInput.isVisible()) {
+                    const username = getNextUsername(settings.mode, settings.customBase);
+                    log(`⌨️ Typing Username: ${username}`);
+                    await customInput.fill(username);
+                    await page.waitForTimeout(1000);
+                    await page.getByRole('button', { name: 'Next' }).click();
+                } else {
+                    // Agar input field abhi bhi nahi mili to shayad direct aglay page par ho
+                    log('⚠️ Username input not found immediately, checking next step...');
+                }
+
+                // CHECK FOR ERROR AFTER USERNAME
+                await page.waitForTimeout(2000);
+                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
+                    throw new Error('IP_BURNED: Google blocked after Username.');
+                }
 
                 // --- STEP 4: PASSWORD ---
                 log('🔑 Setting Password...');
@@ -166,30 +191,32 @@ async function startBot(settings, socket) {
                 await page.fill('input[name="PasswdAgain"]', pass);
                 await page.getByRole('button', { name: 'Next' }).click();
 
-                // --- STEP 5: PHONE SKIP CHECK ---
+                // --- STEP 5: PHONE SKIP ---
                 log('📱 Checking Phone Verification...');
                 await page.waitForTimeout(3000);
+
+                // ERROR CHECK FINAL
+                if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
+                    throw new Error('IP_BURNED: Google blocked at Phone Step.');
+                }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
                     log('✅ SUCCESS: Phone Skip Available! Clicking...', 'success');
                     await skipBtn.click();
-                    // Yahan mazeed steps (Review/Agree) add kiye ja sakte hain
                 } else {
-                    log('⚠️ Phone Number Required. Stopping here.', 'error');
+                    log('⚠️ Phone Number Required. Stopping.', 'error');
                 }
 
             } catch (stepError) {
-                // Agar koi bhi step fail hua to yahan pakra jaye ga
-                // Aur aglay steps nahi chalenge.
-                log(`❌ Stuck: ${stepError.message.split('\n')[0]}`, 'error');
+                log(`❌ Error: ${stepError.message}`, 'error');
+                // Agar IP Burn hui hai to agli proxy par jao, ruko mat
             }
 
-            // Cleanup before next proxy
             clearInterval(streamInterval);
             await context.close();
             await browser.close();
-            log('💤 Waiting 5s before next cycle...');
+            log('💤 Cooling down 5s...');
             await new Promise(r => setTimeout(r, 5000));
         }
 
