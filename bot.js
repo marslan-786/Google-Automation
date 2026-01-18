@@ -46,13 +46,16 @@ async function humanDelay(page) {
     await page.waitForTimeout(delay);
 }
 
+// 📸 Robust Snapshot Helper
 async function takeSnapshot(page, socket, label) {
     if(!page || page.isClosed()) return;
     try {
         const screenshot = await page.screenshot({ quality: 40, type: 'jpeg' });
         socket.emit('screen_update', screenshot.toString('base64'));
         socket.emit('log', `📸 SNAPSHOT: ${label}`);
-    } catch (e) {}
+    } catch (e) {
+        socket.emit('log', `⚠️ Snapshot Failed: ${e.message}`);
+    }
 }
 
 // --- MAIN LOGIC ---
@@ -60,7 +63,6 @@ async function startBot(settings, socket) {
     if (isRunning) return;
     isRunning = true;
 
-    // Generators Setup
     const fingerprintGenerator = new FingerprintGenerator();
     const fingerprintInjector = new FingerprintInjector();
 
@@ -73,32 +75,26 @@ async function startBot(settings, socket) {
     };
 
     try {
-        // --- Loop starts here ---
         for (let i = 0; i < proxyList.length; i++) {
             if (!isRunning) break;
 
             let browser = null;
             let context = null;
+            let page = null; // Defined here for scope safety
 
             try {
                 const currentProxy = proxyList[i];
                 const proxyData = parseProxy(currentProxy);
                 log(`🔄 Cycle ${i+1}: Initializing Fresh Process...`);
 
-                // 1. 🔥 RANDOM FINGERPRINT GENERATION 🔥
-                // Hum Pixel fix nahi kar rahe, ye ab Samsung, Xiaomi, Oppo kuch bhi ban sakta hai
                 const fingerprint = fingerprintGenerator.getFingerprint({
-                    devices: ['mobile'],       // Sirf Mobile
-                    operatingSystems: ['android'], // Sirf Android
-                    browsers: [{ name: 'chrome', minVersion: 110 }], // Latest Chrome wala mobile
+                    devices: ['mobile'],
+                    operatingSystems: ['android'],
+                    browsers: [{ name: 'chrome', minVersion: 110 }],
                 });
 
-                // User Agent se brand ka pata lagayen taake log me dikha saken
-                const ua = fingerprint.fingerprint.navigator.userAgent;
-                log(`📱 Device Identity: ${ua.substring(ua.indexOf('Android'), ua.indexOf('Android')+40)}...`);
+                log(`📱 Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 40)}...`);
 
-                // 2. 🔥 FRESH BROWSER LAUNCH (INSIDE LOOP) 🔥
-                // Har cycle me naya browser khulega
                 browser = await chromium.launch({
                     headless: true,
                     args: [
@@ -106,24 +102,18 @@ async function startBot(settings, socket) {
                         '--no-sandbox', 
                         '--disable-setuid-sandbox',
                         '--ignore-certificate-errors',
-                        '--disable-infobars',
-                        '--hide-scrollbars',
                     ]
                 });
 
-                // 3. Context Create
                 context = await browser.newContext({
                     proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                     locale: 'en-US',
-                    // Baki cheezein fingerprint injector sambhal lega
                 });
 
-                // 4. Inject Fingerprint (Heavy Spoofing)
                 await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
-                const page = await context.newPage();
+                page = await context.newPage(); // Assign to outer variable
 
-                // Stream Interval
                 const streamInterval = setInterval(async () => {
                     if (!isRunning || !page || page.isClosed()) { clearInterval(streamInterval); return; }
                     try {
@@ -138,7 +128,6 @@ async function startBot(settings, socket) {
                 await humanDelay(page);
                 await takeSnapshot(page, socket, 'Page Loaded');
 
-                // IP Check
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 // Step 1: Name
@@ -158,10 +147,8 @@ async function startBot(settings, socket) {
                 await page.locator('#month').click();
                 await page.waitForTimeout(500);
                 await page.getByRole('option', { name: 'January' }).click();
-                await page.waitForTimeout(500);
-
+                
                 await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
-                await page.waitForTimeout(500);
                 await page.locator('input[name="year"]').pressSequentially('1999', { delay: 300 });
 
                 await page.locator('#gender').click();
@@ -174,20 +161,30 @@ async function startBot(settings, socket) {
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
-                // Step 3: Username
+                // --- STEP 3: USERNAME (CRASH FIX) ---
                 log('📧 Handling Username...');
                 await page.waitForTimeout(3000);
+                
+                // 🔥 IMMEDIATE SNAPSHOT (To see where we are)
+                await takeSnapshot(page, socket, 'Username Page Reached'); 
 
-                // Trap Checks
-                const useExisting = page.getByText('Use an email address or phone number');
-                const switchToGmail = page.getByText('Get a Gmail address instead');
-                if (await useExisting.isVisible() || await switchToGmail.isVisible()) {
-                    log('⚠️ Trap Detected. Switching to Gmail Creation...');
-                    await switchToGmail.click();
+                // 🛑 Fix for Strict Mode Error (Using .first() and specific button role)
+                const switchToGmail = page.getByRole('button', { name: 'Get a Gmail address instead' });
+                const useExistingText = page.getByText('Use an email address or phone number').first(); // .first() lagaya taake crash na ho
+
+                if (await switchToGmail.isVisible() || await useExistingText.isVisible()) {
+                    log('⚠️ Detected "Existing Email" page. Switching...');
+                    if (await switchToGmail.isVisible()) {
+                        await switchToGmail.click();
+                    } else {
+                        // Agar button nahi mila to shayed text click karne se kaam ban jaye
+                        await useExistingText.click(); 
+                    }
                     await humanDelay(page);
+                    await takeSnapshot(page, socket, 'Switched to Gmail');
                 }
 
-                const createOwnRadio = page.getByText('Create your own Gmail address');
+                const createOwnRadio = page.getByText('Create your own Gmail address').first();
                 if (await createOwnRadio.isVisible()) {
                     log('🔘 Clicking Radio Button...');
                     await createOwnRadio.click();
@@ -197,13 +194,16 @@ async function startBot(settings, socket) {
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                const userField = page.locator('input[name="Username"]').or(page.locator('input[type="email"]'));
+                const userField = page.locator('input[name="Username"]').or(page.locator('input[type="email"]')).first();
+                
                 if (await userField.isVisible()) {
                     await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
                     await humanDelay(page);
                     await page.getByRole('button', { name: 'Next' }).click();
                     await takeSnapshot(page, socket, 'Clicked Next (Username)');
                 } else {
+                    log('❌ Input Field Not Found!');
+                    await takeSnapshot(page, socket, 'DEBUG_NO_INPUT');
                     throw new Error('Username Input Missing');
                 }
 
@@ -229,9 +229,8 @@ async function startBot(settings, socket) {
 
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_FINAL');
                 
-                // QR Code / Phone Verification Check
                 if (await page.getByText('Verify some info before creating an account').isVisible() || await page.getByText('Scan the QR code').isVisible()) {
-                     throw new Error('CROSS_DEVICE_VERIFY: Google wants physical phone scan.');
+                     throw new Error('CROSS_DEVICE_VERIFY');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
@@ -247,14 +246,12 @@ async function startBot(settings, socket) {
 
             } catch (stepError) {
                 log(`❌ Error: ${stepError.message}`, 'error');
-                await takeSnapshot(page, socket, 'ERROR STATE');
+                // Ab agar page exist karta hai to snapshot lega, warna nahi
+                if (page) await takeSnapshot(page, socket, 'ERROR STATE');
             } finally {
-                // 🔥 CLEANUP AND KILL 🔥
-                // Yahan hum browser ko mukammal band kar rahe hain taake
-                // agli cycle me bilkul fresh start ho.
                 if (context) await context.close();
                 if (browser) await browser.close();
-                log('🗑️ Browser Destroyed. Cleared for next cycle.');
+                log('🗑️ Browser Destroyed.');
             }
 
             log('💤 Resting 8s before fresh start...');
@@ -262,7 +259,7 @@ async function startBot(settings, socket) {
         }
 
     } catch (error) {
-        log(`❌ Critical System Error: ${error.message}`, 'error');
+        log(`❌ System Error: ${error.message}`, 'error');
     } finally {
         isRunning = false;
         socket.emit('log', '🛑 All Tasks Stopped.');
@@ -271,7 +268,6 @@ async function startBot(settings, socket) {
 
 async function stopBot() {
     isRunning = false;
-    // Force Kill just in case
 }
 
 module.exports = { startBot, stopBot };
