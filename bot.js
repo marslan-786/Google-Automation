@@ -43,13 +43,11 @@ function getNextUsername(mode, customBase) {
     return email;
 }
 
-// 🛑 Human Delay Helper (Random 3-6s)
 async function humanDelay(page) {
     const delay = Math.floor(Math.random() * 3000) + 3000; 
     await page.waitForTimeout(delay);
 }
 
-// 📸 Snapshot Helper
 async function takeSnapshot(page, socket, label) {
     if(!page || page.isClosed()) return;
     try {
@@ -64,7 +62,6 @@ async function startBot(settings, socket) {
     if (isRunning) return;
     isRunning = true;
 
-    // 1. Initialize Fingerprint Generators
     const fingerprintGenerator = new FingerprintGenerator();
     const fingerprintInjector = new FingerprintInjector();
 
@@ -84,15 +81,12 @@ async function startBot(settings, socket) {
             const proxyData = parseProxy(currentProxy);
             log(`🔄 Cycle ${i+1}: Connecting...`);
 
-            // 2. Generate a REAL Android Fingerprint
-            // Ye "Pixel 7" ki zid nahi karega, balki ek "VALID" Android device banayega
-            // Taa ke Google ko koi shaq na ho (Samsung, Xiaomi, Pixel - kuch bhi ho sakta hai)
             const fingerprint = fingerprintGenerator.getFingerprint({
                 devices: ['mobile'],
                 operatingSystems: ['android'],
             });
 
-            log(`📱 Spoofing Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 50)}...`);
+            log(`📱 Spoofing Device: ${fingerprint.fingerprint.navigator.userAgent.substring(0, 40)}...`);
 
             browser = await chromium.launch({
                 headless: true,
@@ -104,20 +98,15 @@ async function startBot(settings, socket) {
                 ]
             });
 
-            // 3. Create Context with basic settings
             context = await browser.newContext({
                 proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                 locale: 'en-US',
-                // Baki cheezein ab Injector handle karega
             });
 
-            // 🔥🔥🔥 HEAVY INJECTION 🔥🔥🔥
-            // Ye function Graphics Card, Audio, Battery, Fonts sab badal dega
             await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
             const page = await context.newPage();
 
-            // Background Stream
             const streamInterval = setInterval(async () => {
                 if (!isRunning || page.isClosed()) { clearInterval(streamInterval); return; }
                 try {
@@ -134,14 +123,12 @@ async function startBot(settings, socket) {
 
                 await takeSnapshot(page, socket, 'Page Loaded');
 
-                // Initial IP Check
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
                 const fName = faker.person.firstName();
                 log(`👤 Name: ${fName}`);
                 
                 await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: Math.floor(Math.random() * 200) + 150 }); 
-                
                 await takeSnapshot(page, socket, 'Name Filled');
                 await humanDelay(page);
                 
@@ -153,19 +140,16 @@ async function startBot(settings, socket) {
                 await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
                 await humanDelay(page);
 
-                // Month
                 await page.locator('#month').click();
                 await page.waitForTimeout(1000);
-                await page.getByRole('option', { name: 'January' }).click(); // Better to keep January for consistency
+                await page.getByRole('option', { name: 'January' }).click();
                 await page.waitForTimeout(500);
 
-                // Day & Year
                 await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
                 await page.waitForTimeout(500);
                 await page.locator('input[name="year"]').pressSequentially('1999', { delay: 300 });
                 await page.waitForTimeout(1000);
 
-                // Gender
                 await page.locator('#gender').click();
                 await page.waitForTimeout(1000);
                 const isMale = Math.random() > 0.5;
@@ -178,13 +162,26 @@ async function startBot(settings, socket) {
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
-                // --- STEP 3: USERNAME ---
+                // --- STEP 3: USERNAME (SMART FIX) ---
                 log('📧 Handling Username...');
                 await page.waitForTimeout(3000);
-                
+                await takeSnapshot(page, socket, 'Username Check');
+
+                // 🔴 TRAP CHECK: Are we on "Use existing email" page?
+                const useExisting = page.getByText('Use an email address or phone number');
+                const switchToGmail = page.getByText('Get a Gmail address instead');
+
+                if (await useExisting.isVisible() || await switchToGmail.isVisible()) {
+                    log('⚠️ Detected "Existing Email" page. Switching to Gmail Creation...');
+                    await switchToGmail.click();
+                    await humanDelay(page);
+                    await takeSnapshot(page, socket, 'Switched to Gmail');
+                }
+
+                // 🔵 RADIO CHECK: Are there radio buttons?
                 const createOwnRadio = page.getByText('Create your own Gmail address');
                 if (await createOwnRadio.isVisible()) {
-                    log('🔘 Clicking Radio Button...');
+                    log('🔘 Clicking "Create your own"...');
                     await createOwnRadio.click();
                     await humanDelay(page);
                 }
@@ -192,7 +189,10 @@ async function startBot(settings, socket) {
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                const userField = page.locator('input[name="Username"]');
+                // Now find the input field (Robust Selector)
+                // We try multiple selectors in case Google changes it
+                const userField = page.locator('input[name="Username"]').or(page.locator('input[type="email"]'));
+                
                 if (await userField.isVisible()) {
                     await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
                     await takeSnapshot(page, socket, 'Username Typed');
@@ -200,7 +200,10 @@ async function startBot(settings, socket) {
                     await page.getByRole('button', { name: 'Next' }).click();
                     await takeSnapshot(page, socket, 'Clicked Next (Username)');
                 } else {
-                    log('⚠️ Username field issue.');
+                    log('❌ Username input NOT found!', 'error');
+                    // Force a debug screenshot
+                    await takeSnapshot(page, socket, 'DEBUG_NO_INPUT');
+                    throw new Error('Username Input Missing');
                 }
 
                 await page.waitForTimeout(2000);
@@ -224,22 +227,21 @@ async function startBot(settings, socket) {
                 await takeSnapshot(page, socket, 'Clicked Next (Password)');
 
                 // --- STEP 5: FINAL VERIFICATION ---
-                log('📱 Final Check (The Moment of Truth)...');
+                log('📱 Final Check...');
                 await page.waitForTimeout(5000);
                 await takeSnapshot(page, socket, 'Final Result Page');
 
-                // Check Error
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED_FINAL: Google rejected the fingerprint.');
+                    throw new Error('IP_BURNED_FINAL');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
-                    log('🎉 SUCCESS: Account Created! Phone Skip Available.', 'success');
+                    log('🎉 SUCCESS: Account Created! Clicking Skip.', 'success');
                     await takeSnapshot(page, socket, 'SUCCESS_SCREEN');
                     await skipBtn.click();
                 } else {
-                    log('⚠️ Phone Number Verification Required (Normal behavior).', 'error');
+                    log('⚠️ Phone Number Required.', 'error');
                 }
 
             } catch (stepError) {
