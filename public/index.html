@@ -1,1 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Gen Master - Railway Edition</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root { --bg: #0f172a; --panel: #1e293b; --accent: #3b82f6; --text: #e2e8f0; --term: #000; }
+        body { margin: 0; font-family: 'Courier New', monospace; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Left Panel - Gallery */
+        .gallery-panel { width: 350px; background: var(--panel); border-right: 1px solid #334155; display: flex; flex-direction: column; padding: 10px; overflow-y: auto; }
+        .gallery-title { font-weight: bold; margin-bottom: 10px; color: var(--accent); text-align: center; }
+        .img-container { margin-bottom: 10px; border: 2px solid #334155; border-radius: 5px; overflow: hidden; animation: fadeIn 0.3s; }
+        .img-container img { width: 100%; display: block; }
+        
+        /* Center Panel - Controls */
+        .main-panel { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 20px; }
+        .header { font-size: 24px; font-weight: bold; color: var(--accent); border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
+        
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; background: var(--panel); padding: 20px; border-radius: 8px; }
+        .control-group { display: flex; flex-direction: column; gap: 8px; }
+        label { font-size: 12px; color: #94a3b8; font-weight: bold; }
+        input[type="text"], input[type="password"], textarea, select { 
+            background: #0f172a; border: 1px solid #334155; color: white; padding: 10px; border-radius: 4px; font-family: inherit; 
+        }
+        textarea { height: 100px; resize: none; }
+        
+        .btn-group { grid-column: span 2; display: flex; gap: 10px; }
+        button { flex: 1; padding: 15px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 16px; transition: 0.2s; }
+        .btn-start { background: #10b981; color: white; } .btn-start:hover { background: #059669; }
+        .btn-stop { background: #ef4444; color: white; } .btn-stop:hover { background: #dc2626; }
 
+        /* Bottom - Terminal */
+        .terminal { background: var(--term); color: #22c55e; flex: 1; border-radius: 8px; padding: 15px; overflow-y: auto; font-size: 13px; border: 1px solid #333; box-shadow: inset 0 0 10px rgba(0,0,0,0.5); }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div class="gallery-panel">
+        <div class="gallery-title">📡 LIVE VIEW (Every 3s)</div>
+        <div id="gallery-feed">
+            </div>
+    </div>
+
+    <div class="main-panel">
+        <div class="header">🤖 Google Account Master (Pixel Edition)</div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>USERNAME MODE</label>
+                <select id="mode" onchange="toggleCustom()">
+                    <option value="random">Random (High Trust)</option>
+                    <option value="custom">Custom (Auto-Increment)</option>
+                </select>
+            </div>
+            <div class="control-group" id="customInput" style="display: none;">
+                <label>CUSTOM BASE NAME (e.g., ButtSahb)</label>
+                <input type="text" id="customBase" placeholder="Enter base name...">
+            </div>
+            <div class="control-group">
+                <label>MASTER PASSWORD</label>
+                <input type="password" id="password" value="Pakistan@123" placeholder="Enter password">
+            </div>
+            <div class="control-group" style="grid-column: span 2;">
+                <label>PROXIES (Format: user:pass@host:port OR host:port:user:pass)</label>
+                <textarea id="proxies" placeholder="Paste your proxy list here... One per line"></textarea>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn-start" onclick="startBot()">⚡ START AUTOMATION</button>
+                <button class="btn-stop" onclick="stopBot()">🛑 STOP / RESET</button>
+            </div>
+        </div>
+
+        <div class="terminal" id="terminal">
+            <div class="log-entry">> System Ready... Waiting for command.</div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const gallery = document.getElementById('gallery-feed');
+        const term = document.getElementById('terminal');
+
+        function toggleCustom() {
+            const mode = document.getElementById('mode').value;
+            document.getElementById('customInput').style.display = mode === 'custom' ? 'flex' : 'none';
+        }
+
+        // --- Socket Events ---
+        
+        // 1. Log Receiver
+        socket.on('log', (msg) => {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            div.textContent = msg;
+            term.appendChild(div);
+            term.scrollTop = term.scrollHeight; // Auto scroll
+        });
+
+        // 2. Image Receiver (Ring Buffer)
+        socket.on('screen_update', (base64) => {
+            const imgContainer = document.createElement('div');
+            imgContainer.className = 'img-container';
+            
+            const img = document.createElement('img');
+            img.src = 'data:image/jpeg;base64,' + base64;
+            
+            imgContainer.appendChild(img);
+            
+            // Add new to top
+            gallery.insertBefore(imgContainer, gallery.firstChild);
+
+            // Keep only last 20 images
+            if (gallery.children.length > 20) {
+                gallery.removeChild(gallery.lastChild);
+            }
+        });
+
+        // --- Controls ---
+        function startBot() {
+            const settings = {
+                mode: document.getElementById('mode').value,
+                customBase: document.getElementById('customBase').value,
+                password: document.getElementById('password').value,
+                proxies: document.getElementById('proxies').value
+            };
+            
+            if(settings.mode === 'custom' && !settings.customBase) {
+                alert("Please enter a Custom Base Name!");
+                return;
+            }
+
+            term.innerHTML += '<div class="log-entry" style="color:cyan">> Sending Start Command...</div>';
+            socket.emit('start_bot', settings);
+        }
+
+        function stopBot() {
+            socket.emit('stop_bot');
+            term.innerHTML += '<div class="log-entry" style="color:red">> Sending Stop Command...</div>';
+        }
+    </script>
+</body>
+</html>
