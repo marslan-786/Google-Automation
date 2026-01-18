@@ -7,9 +7,7 @@ const fs = require('fs');
 
 chromium.use(StealthPlugin());
 
-let isRunning = false;
-
-// --- REAL MOBILE PRESETS (Google can't deny these) ---
+// --- REAL MOBILE PRESETS ---
 const MOBILE_DEVICES = [
     { name: "Pixel 7", width: 412, height: 915, ratio: 3.5 },
     { name: "Galaxy S22", width: 360, height: 800, ratio: 3.0 },
@@ -21,6 +19,8 @@ const MOBILE_DEVICES = [
 function getRandomDevice() {
     return MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
 }
+
+let isRunning = false;
 
 // --- Helper Functions ---
 function parseProxy(proxyStr) {
@@ -98,18 +98,15 @@ async function startBot(settings, socket) {
                 const currentProxy = proxyList[i];
                 const proxyData = parseProxy(currentProxy);
                 
-                // 1. Pick a REAL Device Spec
                 const deviceSpec = getRandomDevice();
                 log(`🔄 Cycle ${i+1}: Emulating ${deviceSpec.name} (${deviceSpec.width}x${deviceSpec.height})...`);
 
-                // 2. Generate Fingerprint (Android Mobile Only)
                 const fingerprint = fingerprintGenerator.getFingerprint({
                     devices: ['mobile'],
                     operatingSystems: ['android'],
                     browsers: [{ name: 'chrome', minVersion: 110 }],
                 });
 
-                // 3. FORCE MOBILE ARGS
                 browser = await chromium.launch({
                     headless: true,
                     args: [
@@ -117,29 +114,26 @@ async function startBot(settings, socket) {
                         '--no-sandbox', 
                         '--disable-setuid-sandbox',
                         '--ignore-certificate-errors',
-                        `--window-size=${deviceSpec.width},${deviceSpec.height}`, // Force Window Size
-                        '--user-agent=' + fingerprint.fingerprint.navigator.userAgent // Force UA at launch
+                        `--window-size=${deviceSpec.width},${deviceSpec.height}`,
+                        '--user-agent=' + fingerprint.fingerprint.navigator.userAgent 
                     ]
                 });
 
-                // 4. CONTEXT WITH STRICT VIEWPORT
                 context = await browser.newContext({
                     proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                     locale: 'en-US',
-                    viewport: { width: deviceSpec.width, height: deviceSpec.height }, // STRICT PORTRAIT
+                    viewport: { width: deviceSpec.width, height: deviceSpec.height },
                     deviceScaleFactor: deviceSpec.ratio,
                     isMobile: true,
                     hasTouch: true,
                     userAgent: fingerprint.fingerprint.navigator.userAgent,
                 });
 
-                // 5. INJECT DEEP FINGERPRINTS (Battery, WebGL, Audio)
                 await fingerprintInjector.attachFingerprintToPlaywright(context, fingerprint);
 
                 page = await context.newPage(); 
                 
-                // 🔥🔥🔥 CDP SESSION (The "Heavy" Spoof) 🔥🔥🔥
-                // This talks directly to Chrome Engine to force Mobile Mode
+                // CDP Session (Mobile Force)
                 const client = await context.newCDPSession(page);
                 await client.send('Emulation.setDeviceMetricsOverride', {
                     width: deviceSpec.width,
@@ -152,9 +146,7 @@ async function startBot(settings, socket) {
                     enabled: true,
                     maxTouchPoints: 5
                 });
-                log(`📱 CDP Mobile Emulation Active.`);
 
-                // Stream Interval
                 const streamInterval = setInterval(async () => {
                     if (!isRunning || !page || page.isClosed()) { clearInterval(streamInterval); return; }
                     try {
@@ -167,7 +159,7 @@ async function startBot(settings, socket) {
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
                 await humanDelay(page);
-                await takeSnapshot(page, socket, 'Page Loaded (Should be Mobile View)');
+                await takeSnapshot(page, socket, 'Page Loaded');
 
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_START');
 
@@ -202,24 +194,32 @@ async function startBot(settings, socket) {
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
-                // Step 3: Username
+                // --- STEP 3: USERNAME (RECOVERY LOGIC) ---
                 log('📧 Handling Username...');
                 await page.waitForTimeout(3000);
-                await takeSnapshot(page, socket, 'Username Page'); 
+                await takeSnapshot(page, socket, 'Username Page Reached'); 
 
-                const switchToGmail = page.getByRole('button', { name: 'Get a Gmail address instead' });
-                const useExistingText = page.getByText('Use an email address or phone number').first();
+                // 🛑 TRAP DETECTION
+                const existingPage = page.getByText('Use an email address or phone number').first();
+                const switchToGmail = page.getByText('Get a Gmail address instead').first();
+                const createGmailBtn = page.getByRole('button', { name: 'Create a Gmail address' });
 
-                if (await switchToGmail.isVisible() || await useExistingText.isVisible()) {
-                    log('⚠️ Detected "Existing Email" page. Switching...');
+                if (await existingPage.isVisible()) {
+                    log('⚠️ Trap: Google forced "Existing Email". Attempting Switch...');
+                    
                     if (await switchToGmail.isVisible()) {
                         await switchToGmail.click();
+                        log('✅ Clicked "Get a Gmail address instead"');
+                    } else if (await createGmailBtn.isVisible()) {
+                        await createGmailBtn.click();
+                        log('✅ Clicked "Create a Gmail address"');
                     } else {
-                        await useExistingText.click(); 
+                        log('❌ No Switch Button Found! Attempting blind type...');
                     }
                     await humanDelay(page);
                 }
 
+                // Radio Button Logic
                 const createOwnRadio = page.getByText('Create your own Gmail address').first();
                 if (await createOwnRadio.isVisible()) {
                     log('🔘 Clicking Radio Button...');
@@ -230,7 +230,8 @@ async function startBot(settings, socket) {
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                const userField = page.locator('input[name="Username"]').or(page.locator('input[type="email"]')).first();
+                // 🔥 FALLBACK SELECTOR: Find ANY input field
+                const userField = page.locator('input').first();
                 
                 if (await userField.isVisible()) {
                     await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
@@ -238,12 +239,17 @@ async function startBot(settings, socket) {
                     await page.getByRole('button', { name: 'Next' }).click();
                     await takeSnapshot(page, socket, 'Clicked Next (Username)');
                 } else {
-                    log('❌ Input Field Not Found!');
-                    await takeSnapshot(page, socket, 'DEBUG_NO_INPUT');
+                    log('❌ CRITICAL: No Input Field found at all.');
+                    await takeSnapshot(page, socket, 'DEBUG_CRASH');
                     throw new Error('Username Input Missing');
                 }
 
                 await page.waitForTimeout(2000);
+                // Check if Google rejected the switch
+                if (await page.getByText('Use an email address or phone number').isVisible()) {
+                     throw new Error('TRAP_LOOP: Google refused to switch to Gmail.');
+                }
+                
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_USER');
 
                 // Step 4: Password
@@ -266,7 +272,7 @@ async function startBot(settings, socket) {
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_FINAL');
                 
                 if (await page.getByText('Verify some info before creating an account').isVisible() || await page.getByText('Scan the QR code').isVisible()) {
-                     throw new Error('CROSS_DEVICE_VERIFY: Google still detects Desktop traits.');
+                     throw new Error('CROSS_DEVICE_VERIFY: Mobile Spoof successful, but Trust Score low.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
@@ -289,7 +295,7 @@ async function startBot(settings, socket) {
                 log('🗑️ Browser Destroyed.');
             }
 
-            log('💤 Resting 8s before fresh start...');
+            log('💤 Resting 8s...');
             await new Promise(r => setTimeout(r, 8000));
         }
 
