@@ -13,6 +13,7 @@
             --border: #333; 
             --neon-green: #00ff41; 
             --neon-red: #ff003c; 
+            --neon-blue: #0088ff;
             --text-main: #c9d1d9; 
         }
 
@@ -30,15 +31,15 @@
         /* --- LAYOUT GRID --- */
         .main-container {
             display: grid;
-            grid-template-columns: 320px 1fr; /* Left Gallery fixed, Right flexible */
-            grid-template-rows: 1fr 200px;    /* Top Content, Bottom Terminal */
+            grid-template-columns: 320px 1fr;
+            grid-template-rows: 1fr 200px;
             height: 100vh;
             width: 100vw;
         }
 
-        /* --- 1. LEFT: GALLERY PANEL --- */
+        /* --- LEFT: GALLERY PANEL --- */
         .gallery-area {
-            grid-row: 1 / 3; /* Full height */
+            grid-row: 1 / 3;
             background: #000;
             border-right: 1px solid var(--neon-green);
             display: flex;
@@ -75,19 +76,19 @@
             transition: 0.2s;
         }
         .snapshot:first-child {
-            border: 2px solid var(--neon-green); /* Latest image highlighted */
+            border: 2px solid var(--neon-green);
             opacity: 1;
             box-shadow: 0 0 10px rgba(0, 255, 65, 0.2);
         }
-        .snapshot:hover { opacity: 1; transform: scale(1.02); }
 
-        /* --- 2. RIGHT TOP: CONTROLS --- */
+        /* --- RIGHT TOP: CONTROLS --- */
         .controls-area {
             padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 15px;
             overflow-y: auto;
+            position: relative; /* For Overlay Context */
         }
 
         .logo { font-size: 20px; color: #fff; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 10px; }
@@ -124,7 +125,7 @@
         .btn-stop { background: #da3633; color: white; }
         .btn-stop:hover { background: #f85149; }
 
-        /* --- 3. RIGHT BOTTOM: TERMINAL --- */
+        /* --- RIGHT BOTTOM: TERMINAL --- */
         .terminal-area {
             background: #0d1117;
             border-top: 1px solid #333;
@@ -139,8 +140,47 @@
         .log-msg { color: #c9d1d9; }
         .log-msg.error { color: var(--neon-red); }
         .log-msg.success { color: var(--neon-green); }
+        .log-msg.info { color: var(--neon-blue); font-weight: bold; }
 
-        /* Custom Scrollbar */
+        /* --- 🔥 MANUAL INPUT OVERLAY (New Addition) 🔥 --- */
+        #manual-overlay {
+            display: none; /* Hidden by default */
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            backdrop-filter: blur(5px);
+        }
+
+        .manual-box {
+            background: #111;
+            border: 2px solid var(--neon-blue);
+            padding: 30px;
+            width: 400px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 0 30px rgba(0, 136, 255, 0.3);
+            animation: pulse-border 1.5s infinite alternate;
+        }
+
+        .manual-box h3 { margin-top: 0; color: var(--neon-blue); text-transform: uppercase; }
+        .manual-box p { color: #aaa; font-size: 13px; margin-bottom: 20px; }
+        
+        .manual-box input { 
+            width: 100%; box-sizing: border-box; font-size: 18px; text-align: center; letter-spacing: 2px;
+            border-color: var(--neon-blue);
+        }
+
+        .btn-send {
+            background: var(--neon-blue); color: white; margin-top: 15px; width: 100%;
+        }
+        .btn-send:hover { background: #0066cc; }
+
+        @keyframes pulse-border { from { border-color: var(--neon-blue); } to { border-color: #fff; } }
+
+        /* Scrollbar */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #000; }
         ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
@@ -149,6 +189,15 @@
     </style>
 </head>
 <body>
+
+<div id="manual-overlay">
+    <div class="manual-box">
+        <h3 id="manual-title">⚠️ ACTION REQUIRED</h3>
+        <p id="manual-desc">The bot needs your input to proceed.</p>
+        <input type="text" id="manual-value" placeholder="Type here...">
+        <button class="btn-send" onclick="sendManualData()">SEND DATA ➡️</button>
+    </div>
+</div>
 
 <div class="main-container">
 
@@ -209,6 +258,13 @@
     const socket = io();
     const term = document.getElementById('terminal');
     const gallery = document.getElementById('gallery-feed');
+    
+    // Manual Input Elements
+    const manualOverlay = document.getElementById('manual-overlay');
+    const manualTitle = document.getElementById('manual-title');
+    const manualDesc = document.getElementById('manual-desc');
+    const manualInput = document.getElementById('manual-value');
+    let currentRequestType = null;
 
     // Toggle Custom Input
     function toggleCustom() {
@@ -223,10 +279,10 @@
         const div = document.createElement('div');
         div.className = 'log-line';
         
-        // Check for keywords to colorize
         let msgClass = 'log-msg';
         if(msg.includes('Error') || msg.includes('Failed')) msgClass += ' error';
         if(msg.includes('Success') || msg.includes('Created')) msgClass += ' success';
+        if(msg.includes('WAITING') || msg.includes('MANUAL')) msgClass += ' info';
 
         div.innerHTML = `<span class="log-time">[${now}]</span><span class="${msgClass}">${msg}</span>`;
         term.appendChild(div);
@@ -234,23 +290,47 @@
     });
 
     socket.on('screen_update', (base64) => {
-        // Clear "Waiting..." text if present
         if(gallery.innerText.includes('Waiting')) gallery.innerHTML = '';
-
         const img = document.createElement('img');
         img.src = 'data:image/jpeg;base64,' + base64;
         img.className = 'snapshot';
-        
-        // Add new image to TOP
         gallery.prepend(img);
-
-        // Limit to 15 images to save browser memory
         if (gallery.children.length > 15) {
             gallery.removeChild(gallery.lastChild);
         }
     });
 
+    // 🔥 LISTENER FOR MANUAL INPUT REQUEST 🔥
+    socket.on('request_manual_input', (type) => {
+        currentRequestType = type;
+        manualOverlay.style.display = 'flex'; // Show Popup
+        manualInput.value = '';
+        manualInput.focus();
+
+        if (type === 'phone') {
+            manualTitle.innerText = "📱 PHONE NUMBER REQUIRED";
+            manualDesc.innerText = "Please enter phone number (e.g., +923001234567)";
+        } else if (type === 'otp') {
+            manualTitle.innerText = "🔢 OTP CODE REQUIRED";
+            manualDesc.innerText = "Please enter the 6-digit code from SMS";
+        }
+
+        // Play alert sound
+        new Audio('https://media.geeksforgeeks.org/wp-content/uploads/20190531135120/beep.mp3').play().catch(()=>{});
+    });
+
     // --- ACTIONS ---
+
+    function sendManualData() {
+        const val = manualInput.value;
+        if(!val) return alert("Please enter a value!");
+
+        socket.emit('manual_response', { type: currentRequestType, value: val });
+        
+        // Hide Popup
+        manualOverlay.style.display = 'none';
+        addLog(`User sent manual data: ${val}`);
+    }
 
     function startBot() {
         const proxies = document.getElementById('proxies').value;
