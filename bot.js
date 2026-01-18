@@ -42,9 +42,9 @@ function getNextUsername(mode, customBase) {
     return email;
 }
 
-// 🛑 Human Delay Helper (3 to 5 seconds random wait)
+// 🛑 Human Delay Helper (Random 3-6s)
 async function humanDelay(page) {
-    const delay = Math.floor(Math.random() * 2000) + 3000; // 3000ms - 5000ms
+    const delay = Math.floor(Math.random() * 3000) + 3000; 
     await page.waitForTimeout(delay);
 }
 
@@ -80,12 +80,14 @@ async function startBot(settings, socket) {
             log(`🔄 Cycle ${i+1}: Connecting with ${currentProxy === "Direct IP" ? "No Proxy" : "Proxy"}`);
 
             browser = await chromium.launch({
-                headless: true, // Railway par TRUE
+                headless: true,
                 args: [
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox', 
                     '--disable-setuid-sandbox',
                     '--ignore-certificate-errors',
+                    '--disable-webgl-image-chromium', 
+                    '--disable-accelerated-2d-canvas',
                 ]
             });
 
@@ -93,16 +95,54 @@ async function startBot(settings, socket) {
                 ...devices['Pixel 7'],
                 proxy: proxyData ? { server: proxyData.server, username: proxyData.username, password: proxyData.password } : undefined,
                 locale: 'en-US',
-                timezoneId: 'America/New_York',
+                // ⚠️ Timezone ab proxy ke hisab se set hona chahiye, hardcode hata diya hai
+                // timezoneId: 'America/New_York', 
                 deviceScaleFactor: 3,
                 isMobile: true,
                 hasTouch: true,
                 userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
             });
 
+            // 🔥🔥🔥 THE HARDCORE SPOOFING INJECTION 🔥🔥🔥
             await context.addInitScript(() => {
+                // 1. Webdriver Hiding
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                
+                // 2. Hardware Info (Real Pixel 7 Specs)
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
                 Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' });
+
+                // 3. Fake Battery API (Mobile always has battery)
+                if (navigator.getBattery) {
+                    navigator.getBattery = async () => ({
+                        charging: true,
+                        chargingTime: 0,
+                        dischargingTime: Infinity,
+                        level: 0.85, // 85% Battery
+                        addEventListener: () => {}
+                    });
+                }
+
+                // 4. Fake Network Information (4G Connection)
+                Object.defineProperty(navigator, 'connection', {
+                    get: () => ({
+                        effectiveType: '4g',
+                        rtt: 50,
+                        downlink: 10,
+                        saveData: false
+                    })
+                });
+
+                // 5. 🛑 GPU SPOOFING (Sabse Important) 🛑
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    // UNMASKED_VENDOR_WEBGL
+                    if (parameter === 37445) return 'ARM';
+                    // UNMASKED_RENDERER_WEBGL (Mali-G710 is Pixel 7 GPU)
+                    if (parameter === 37446) return 'Mali-G710';
+                    return getParameter(parameter);
+                };
             });
 
             const page = await context.newPage();
@@ -120,7 +160,7 @@ async function startBot(settings, socket) {
                 // --- STEP 1: NAME ---
                 log('🌐 Opening Signup Page...');
                 await page.goto('https://accounts.google.com/signup/v2/createaccount?flowName=GlifWebSignIn&flowEntry=SignUp', { timeout: 60000 });
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
 
                 await takeSnapshot(page, socket, 'Page Loaded');
 
@@ -129,11 +169,10 @@ async function startBot(settings, socket) {
                 const fName = faker.person.firstName();
                 log(`👤 Name: ${fName}`);
                 
-                // Super Slow Typing (200ms - 400ms per key)
-                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: Math.floor(Math.random() * 200) + 200 }); 
+                await page.locator('input[name="firstName"]').pressSequentially(fName, { delay: Math.floor(Math.random() * 200) + 150 }); 
                 
                 await takeSnapshot(page, socket, 'Name Filled');
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
                 
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Name)');
@@ -141,21 +180,21 @@ async function startBot(settings, socket) {
                 // --- STEP 2: BIRTHDAY ---
                 log('🎂 Filling Birthday...');
                 await page.waitForSelector('#month', { state: 'visible', timeout: 15000 });
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
 
                 // Month
                 await page.locator('#month').click();
-                await page.waitForTimeout(1000); // Thora slow
+                await page.waitForTimeout(1000);
                 await page.getByRole('option', { name: 'January' }).click();
                 await page.waitForTimeout(500);
 
-                // Day & Year (Typing Slowly)
+                // Day & Year
                 await page.locator('input[name="day"]').pressSequentially(String(Math.floor(Math.random() * 28) + 1), { delay: 300 });
                 await page.waitForTimeout(500);
                 await page.locator('input[name="year"]').pressSequentially('1998', { delay: 300 });
                 await page.waitForTimeout(1000);
 
-                // Gender (Fixed Strict Mode Issue)
+                // Gender (Strict Mode Fixed)
                 await page.locator('#gender').click();
                 await page.waitForTimeout(1000);
                 
@@ -163,37 +202,39 @@ async function startBot(settings, socket) {
                 const genderText = isMale ? 'Male' : 'Female';
                 log(`Selected Gender: ${genderText}`);
 
-                // 🛠 FIX: exact: true use kiya taake Male/Female mix na hon
                 await page.getByRole('option', { name: genderText, exact: true }).click();
 
                 await takeSnapshot(page, socket, 'Birthday Filled');
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
                 
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Birthday)');
 
                 // --- STEP 3: USERNAME ---
                 log('📧 Handling Username...');
-                await page.waitForTimeout(3000); // Initial wait
+                await page.waitForTimeout(3000);
                 
-                // Check Radio Button
                 const createOwnRadio = page.getByText('Create your own Gmail address');
                 if (await createOwnRadio.isVisible()) {
                     log('🔘 Clicking Radio Button...');
                     await createOwnRadio.click();
-                    await humanDelay(page); // 🛑 Wait 3-5s
+                    await humanDelay(page);
                 }
 
                 const username = getNextUsername(settings.mode, settings.customBase);
                 log(`⌨️ Typing: ${username}`);
                 
-                await page.locator('input[name="Username"]').pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
-                
-                await takeSnapshot(page, socket, 'Username Typed');
-                await humanDelay(page); // 🛑 Wait 3-5s
-                
-                await page.getByRole('button', { name: 'Next' }).click();
-                await takeSnapshot(page, socket, 'Clicked Next (Username)');
+                // Agar input field na ho to wait karo
+                const userField = page.locator('input[name="Username"]');
+                if (await userField.isVisible()) {
+                    await userField.pressSequentially(username, { delay: Math.floor(Math.random() * 150) + 150 });
+                    await takeSnapshot(page, socket, 'Username Typed');
+                    await humanDelay(page);
+                    await page.getByRole('button', { name: 'Next' }).click();
+                    await takeSnapshot(page, socket, 'Clicked Next (Username)');
+                } else {
+                    log('⚠️ Username field not found immediately.');
+                }
 
                 await page.waitForTimeout(2000);
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) throw new Error('IP_BURNED_USER');
@@ -201,17 +242,16 @@ async function startBot(settings, socket) {
                 // --- STEP 4: PASSWORD ---
                 log('🔑 Setting Password...');
                 await page.waitForSelector('input[name="Passwd"]', { timeout: 15000 });
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
 
                 const pass = settings.password;
                 
-                // Typing Password Slowly
                 await page.locator('input[name="Passwd"]').pressSequentially(pass, { delay: 200 });
                 await page.waitForTimeout(1000);
                 await page.locator('input[name="PasswdAgain"]').pressSequentially(pass, { delay: 200 });
 
                 await takeSnapshot(page, socket, 'Password Filled');
-                await humanDelay(page); // 🛑 Wait 3-5s
+                await humanDelay(page);
                 
                 await page.getByRole('button', { name: 'Next' }).click();
                 await takeSnapshot(page, socket, 'Clicked Next (Password)');
@@ -221,17 +261,19 @@ async function startBot(settings, socket) {
                 await page.waitForTimeout(5000);
                 await takeSnapshot(page, socket, 'Final Result Page');
 
+                // Check Error
                 if (await page.getByText('Sorry, we could not create your Google Account').isVisible()) {
-                    throw new Error('IP_BURNED_FINAL: Google detected bot behavior.');
+                    throw new Error('IP_BURNED_FINAL: Google detected GPU/Server signature.');
                 }
 
                 const skipBtn = page.getByRole('button', { name: 'Skip' });
                 if (await skipBtn.isVisible()) {
-                    log('✅ SUCCESS: Phone Skip Available!', 'success');
+                    log('✅ SUCCESS: Account Created! Phone Skip Clicked.', 'success');
                     await takeSnapshot(page, socket, 'Success Page');
                     await skipBtn.click();
+                    // Yahan DB save logic aa sakti hai
                 } else {
-                    log('⚠️ Phone Number Required.', 'error');
+                    log('⚠️ Phone Number Required (Normal Verification).', 'error');
                 }
 
             } catch (stepError) {
